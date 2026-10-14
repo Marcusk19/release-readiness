@@ -6,6 +6,9 @@ export interface KonfluxRelease {
 	failed_task?: string;
 	failed_step?: string;
 	completion_time?: string;
+	/** The ART job that made the Release, and its errata URL. */
+	job_url?: string;
+	advisory?: string;
 }
 
 /**
@@ -365,12 +368,34 @@ export interface ReadinessResponse {
 	message: string;
 }
 
+/** The ART shipment MR of a version in GitLab. */
+export interface ShipmentMR {
+	iid: number;
+	web_url: string;
+	state: "opened" | "merged" | "closed";
+	draft: boolean;
+	stage: "open" | "stage_released" | "prod_released" | "shipped" | "closed";
+	pipeline_failed: boolean;
+	needs_approval: boolean;
+	head_pipeline_status: string;
+	merged_at?: string;
+	updated_at: string;
+	/** "pointer" when ocp-build-data names the MR, "search" when found by branch. */
+	source: "pointer" | "search";
+}
+
 export interface ReleaseOverview {
 	release: ReleaseVersion;
 	issue_summary?: IssueSummary;
 	readiness: ReadinessResponse;
 	latest_build?: string;
 	next_in_stream: boolean;
+	shipment_mr: ShipmentMR | null;
+}
+
+/** GET /releases/{version}. */
+export interface ReleaseDetail extends ReleaseVersion {
+	shipment_mr: ShipmentMR | null;
 }
 
 export interface DashboardConfig {

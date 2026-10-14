@@ -88,6 +88,12 @@ type KonfluxRelease struct {
 	CompletionTime string
 }
 
+type KonfluxReleaseArt struct {
+	Name     string
+	JobUrl   string
+	Advisory string
+}
+
 type ProwInstallFailure struct {
 	JobName string
 	BuildID string
@@ -124,6 +130,22 @@ type ReleaseVersion struct {
 	ReleaseTicketAssignee string
 	KonfluxApplication    string
 	DueDate               string
+}
+
+type ShipmentMr struct {
+	Version             string
+	Assembly            string
+	Iid                 int64
+	WebUrl              string
+	State               string
+	Draft               int64
+	Labels              string
+	HeadPipelineStatus  string
+	DetailedMergeStatus string
+	MergedAt            string
+	UpdatedAt           string
+	Source              string
+	CheckedAt           string
 }
 
 type Snapshot struct {
