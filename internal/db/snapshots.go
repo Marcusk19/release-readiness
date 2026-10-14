@@ -16,12 +16,17 @@ func (d *DB) CreateSnapshot(ctx context.Context, application, name string, creat
 	})
 }
 
-func (d *DB) SnapshotExistsByName(ctx context.Context, name string) (bool, error) {
-	count, err := d.queries().SnapshotExistsByName(ctx, name)
+// SnapshotNames returns the names of every stored Snapshot.
+func (d *DB) SnapshotNames(ctx context.Context) (map[string]bool, error) {
+	names, err := d.queries().ListSnapshotNames(ctx)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	return count > 0, nil
+	m := make(map[string]bool, len(names))
+	for _, n := range names {
+		m[n] = true
+	}
+	return m, nil
 }
 
 func (d *DB) CreateSnapshotComponent(ctx context.Context, snapshotID int64, component, imageURL string) error {

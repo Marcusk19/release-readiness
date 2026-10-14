@@ -100,33 +100,71 @@ func (q *Queries) ListFinishedProwBuildIDs(ctx context.Context, jobName string) 
 	return items, nil
 }
 
-const listProwRunImages = `-- name: ListProwRunImages :many
-SELECT role, digest
-FROM prow_run_images
-WHERE job_name = ? AND build_id = ?
-ORDER BY id
+const listProwRunImagesByApplication = `-- name: ListProwRunImagesByApplication :many
+SELECT i.job_name, i.build_id, i.role, i.digest
+FROM prow_run_images i
+JOIN prow_runs r ON r.job_name = i.job_name AND r.build_id = i.build_id
+WHERE r.application = ?
+ORDER BY i.id
 `
 
-type ListProwRunImagesParams struct {
+type ListProwRunImagesByApplicationRow struct {
 	JobName string
 	BuildID string
+	Role    string
+	Digest  string
 }
 
-type ListProwRunImagesRow struct {
-	Role   string
-	Digest string
-}
-
-func (q *Queries) ListProwRunImages(ctx context.Context, arg ListProwRunImagesParams) ([]ListProwRunImagesRow, error) {
-	rows, err := q.db.QueryContext(ctx, listProwRunImages, arg.JobName, arg.BuildID)
+func (q *Queries) ListProwRunImagesByApplication(ctx context.Context, application string) ([]ListProwRunImagesByApplicationRow, error) {
+	rows, err := q.db.QueryContext(ctx, listProwRunImagesByApplication, application)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListProwRunImagesRow
+	var items []ListProwRunImagesByApplicationRow
 	for rows.Next() {
-		var i ListProwRunImagesRow
-		if err := rows.Scan(&i.Role, &i.Digest); err != nil {
+		var i ListProwRunImagesByApplicationRow
+		if err := rows.Scan(
+			&i.JobName,
+			&i.BuildID,
+			&i.Role,
+			&i.Digest,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProwRunStarts = `-- name: ListProwRunStarts :many
+SELECT build_id, started_at FROM prow_runs
+WHERE job_name = ?
+ORDER BY started_at DESC, build_id DESC
+`
+
+type ListProwRunStartsRow struct {
+	BuildID   string
+	StartedAt string
+}
+
+// The job's runs, newest first.
+func (q *Queries) ListProwRunStarts(ctx context.Context, jobName string) ([]ListProwRunStartsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listProwRunStarts, jobName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListProwRunStartsRow
+	for rows.Next() {
+		var i ListProwRunStartsRow
+		if err := rows.Scan(&i.BuildID, &i.StartedAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

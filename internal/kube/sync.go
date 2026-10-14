@@ -50,6 +50,9 @@ type Syncer struct {
 	logger    *slog.Logger
 	// Status receives each pass's outcome; nil reports nowhere.
 	Status *syncstatus.Source
+	// Retention, when set, skips unstored objects older than it that the
+	// retention prune would delete.
+	Retention time.Duration
 }
 
 // NewSyncer creates a Syncer that lists Snapshots in namespace and persists them to database.
@@ -73,15 +76,56 @@ func (s *Syncer) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
+// stored is what the database holds at the start of a pass.
+type stored struct {
+	snapshots map[string]bool
+	staged    map[string]db.StagedSnapshot
+	releases  map[string]model.KonfluxRelease
+	// shipped holds the Snapshots a stored Release shipped.
+	shipped map[string]bool
+	// cutoff is the start of the retention window, zero for none.
+	cutoff time.Time
+}
+
 // SyncOnce ingests Snapshots not yet stored and upserts every Release, whose
-// status keeps changing after creation.
+// status keeps changing after creation, unless the stored row already holds it.
 func (s *Syncer) SyncOnce(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
 	defer cancel()
+	st, err := s.load(ctx)
+	if err != nil {
+		s.logger.Error("load stored", "error", err)
+		s.Status.Report(fmt.Errorf("load stored: %w", err))
+		return
+	}
+	if s.Retention > 0 {
+		st.cutoff = time.Now().Add(-s.Retention)
+	}
 	var pass syncstatus.Pass
-	s.each(ctx, &pass, snapshotGVR, s.sync)
-	s.each(ctx, &pass, releaseGVR, s.syncRelease)
+	s.each(ctx, &pass, snapshotGVR, func(ctx context.Context, obj *unstructured.Unstructured) error { return s.sync(ctx, obj, st) })
+	s.each(ctx, &pass, releaseGVR, func(ctx context.Context, obj *unstructured.Unstructured) error { return s.syncRelease(ctx, obj, st) })
 	s.Status.Report(pass.Err())
+}
+
+func (s *Syncer) load(ctx context.Context) (*stored, error) {
+	var st stored
+	var err error
+	if st.snapshots, err = s.db.SnapshotNames(ctx); err != nil {
+		return nil, err
+	}
+	if st.staged, err = s.db.StagedSnapshots(ctx); err != nil {
+		return nil, err
+	}
+	if st.releases, err = s.db.KonfluxReleases(ctx); err != nil {
+		return nil, err
+	}
+	st.shipped = map[string]bool{}
+	for _, r := range st.releases {
+		if r.ReleasedReason == "Succeeded" {
+			st.shipped[r.Snapshot] = true
+		}
+	}
+	return &st, nil
 }
 
 func (s *Syncer) each(ctx context.Context, pass *syncstatus.Pass, gvr schema.GroupVersionResource, fn func(context.Context, *unstructured.Unstructured) error) {
@@ -113,19 +157,24 @@ func (s *Syncer) each(ctx context.Context, pass *syncstatus.Pass, gvr schema.Gro
 	}
 }
 
-func (s *Syncer) sync(ctx context.Context, obj *unstructured.Unstructured) error {
+func (s *Syncer) sync(ctx context.Context, obj *unstructured.Unstructured, st *stored) error {
 	name := obj.GetName()
-	// Recorded on every pass, so Snapshots stored before this table existed get theirs.
+	// Checked on every pass, so Snapshots stored before this table existed get theirs.
 	a := obj.GetAnnotations()
 	assembly, kind, env := a["art.redhat.com/assembly"], a["art.redhat.com/kind"], a["art.redhat.com/env"]
-	if assembly != "" && kind != "" && env != "" {
+	staged := db.StagedSnapshot{Assembly: assembly, Kind: kind, Env: env}
+	annotated := assembly != "" && kind != "" && env != ""
+	if annotated && st.staged[name] != staged {
 		if err := s.db.UpsertStagedSnapshot(ctx, name, assembly, kind, env); err != nil {
 			return fmt.Errorf("store staged snapshot: %w", err)
 		}
+		st.staged[name] = staged
 	}
-	exists, err := s.db.SnapshotExistsByName(ctx, name)
-	if err != nil || exists {
-		return err
+	if st.snapshots[name] {
+		return nil
+	}
+	if !annotated && !st.shipped[name] && obj.GetCreationTimestamp().Time.Before(st.cutoff) {
+		return nil
 	}
 
 	specMap, _, err := unstructured.NestedMap(obj.Object, "spec")
@@ -163,7 +212,7 @@ func (s *Syncer) sync(ctx context.Context, obj *unstructured.Unstructured) error
 	})
 }
 
-func (s *Syncer) syncRelease(ctx context.Context, obj *unstructured.Unstructured) error {
+func (s *Syncer) syncRelease(ctx context.Context, obj *unstructured.Unstructured, st *stored) error {
 	r := &model.KonfluxRelease{
 		Name:        obj.GetName(),
 		Application: obj.GetLabels()["appstudio.openshift.io/application"],
@@ -193,7 +242,22 @@ func (s *Syncer) syncRelease(ctx context.Context, obj *unstructured.Unstructured
 		}
 	}
 
+	old, ok := st.releases[r.Name]
+	_, staged := st.staged[r.Snapshot]
+	if !ok && !staged && r.ReleasedReason == "Failed" && r.CreatedAt.Before(st.cutoff) {
+		return nil
+	}
+	if ok && (old.ReleasedReason == "Succeeded" || old.ReleasedReason == "Failed") && sameRelease(old, *r) {
+		return nil
+	}
 	return s.db.UpsertKonfluxRelease(ctx, r)
+}
+
+func sameRelease(a, b model.KonfluxRelease) bool {
+	ac, bc := a.CompletionTime, b.CompletionTime
+	times := a.CreatedAt.Equal(b.CreatedAt) && (ac == nil) == (bc == nil) && (ac == nil || ac.Equal(*bc))
+	a.CreatedAt, b.CreatedAt, a.CompletionTime, b.CompletionTime = time.Time{}, time.Time{}, nil, nil
+	return times && a == b
 }
 
 func nestedTime(obj *unstructured.Unstructured, fields ...string) *time.Time {
