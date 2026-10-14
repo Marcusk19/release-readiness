@@ -5,23 +5,35 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
+	"github.com/quay/release-readiness/internal/catalog"
 	"github.com/quay/release-readiness/internal/db"
-	s3client "github.com/quay/release-readiness/internal/s3"
+	"github.com/quay/release-readiness/internal/syncstatus"
 )
 
 type Server struct {
 	db          *db.DB
-	s3          *s3client.Client
 	http        *http.Server
 	logger      *slog.Logger
 	jiraBaseURL string
 	jiraProject string
+	artBaseURL  string
+	shipped     *catalog.Shipped
+	syncStatus  *syncstatus.Registry
+	// StageReleasePlanPattern matches the ReleasePlan names whose Releases
+	// are image STAGE; nil selects no staged build.
+	StageReleasePlanPattern *regexp.Regexp
+	// KonfluxUIURL and KonfluxNamespace locate the Konflux UI pages the web
+	// links to; an empty URL links none.
+	KonfluxUIURL, KonfluxNamespace string
 }
 
-func New(database *db.DB, s3c *s3client.Client, addr, jiraBaseURL, jiraProject string, logger *slog.Logger) *Server {
-	s := &Server{db: database, s3: s3c, logger: logger, jiraBaseURL: jiraBaseURL, jiraProject: jiraProject}
+// New builds the server. A nil shipped leaves JIRA's released flag as the only
+// shipped signal.
+func New(database *db.DB, addr, jiraBaseURL, jiraProject, artBaseURL string, shipped *catalog.Shipped, syncStatus *syncstatus.Registry, logger *slog.Logger) *Server {
+	s := &Server{db: database, logger: logger, jiraBaseURL: jiraBaseURL, jiraProject: jiraProject, artBaseURL: artBaseURL, shipped: shipped, syncStatus: syncStatus}
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 

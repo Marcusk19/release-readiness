@@ -4,39 +4,125 @@
 
 package dbsqlc
 
-type Component struct {
-	ID          int64
-	Name        string
-	Description string
-	CreatedAt   string
+import (
+	"database/sql"
+	"time"
+)
+
+type ArtBuild struct {
+	Digest    string
+	State     string
+	Nvr       string
+	RecordID  string
+	CheckedAt string
+}
+
+type ArtHistoryRecord struct {
+	RecordID  string
+	GroupName string
+	BuildType string
+	Nvr       string
+	Digest    string
+	Pullspec  string
+	Commitish string
+	StartTime string
+}
+
+type ArtHistoryRecordDay struct {
+	GroupName string
+	BuildType string
+	Day       string
+	CheckedAt string
+}
+
+type FbcRelatedImage struct {
+	Digest string
+	Role   string
+	Name   string
+	Image  string
+}
+
+type FbcRender struct {
+	Digest             string
+	State              string
+	LabelNvr           string
+	Channel            string
+	HeadCsv            string
+	HeadBundlePullspec string
+	PreviousVersion    string
+	Error              string
+	RenderedAt         string
+	RetryAfter         string
+}
+
+type ImageScan struct {
+	Digest      string
+	State       string
+	PipelineRun string
+	DetailUrl   string
+	CountsJson  sql.NullString
+	ReportsJson sql.NullString
+	CheckedAt   string
 }
 
 type JiraIssue struct {
 	ID         int64
 	Key        string
 	Summary    string
-	Status     string
-	Priority   string
-	Labels     string
 	FixVersion string
-	Assignee   string
 	IssueType  string
-	Resolution string
 	Link       string
-	QaContact  string
-	UpdatedAt  string
+}
+
+type KonfluxRelease struct {
+	ID             int64
+	Name           string
+	Application    string
+	Snapshot       string
+	ReleasePlan    string
+	ReleasedStatus string
+	ReleasedReason string
+	FailedTask     string
+	FailedStep     string
+	CreatedAt      string
+	CompletionTime string
+}
+
+type ProwInstallFailure struct {
+	JobName string
+	BuildID string
+}
+
+type ProwRun struct {
+	JobName       string
+	BuildID       string
+	Application   string
+	State         string
+	StartedAt     string
+	CompletedAt   string
+	ProwUrl       string
+	ArtifactState string
+	CatalogRef    string
+	FetchedAt     string
+}
+
+type ProwRunImage struct {
+	ID      int64
+	JobName string
+	BuildID string
+	Role    string
+	Digest  string
 }
 
 type ReleaseVersion struct {
 	ID                    int64
 	Name                  string
-	Description           string
 	ReleaseDate           string
 	Released              int64
 	Archived              int64
 	ReleaseTicketKey      string
 	ReleaseTicketAssignee string
-	S3Application         string
+	KonfluxApplication    string
 	DueDate               string
 }
 
@@ -44,7 +130,6 @@ type Snapshot struct {
 	ID          int64
 	Application string
 	Name        string
-	TestsPassed int64
 	CreatedAt   string
 }
 
@@ -52,69 +137,17 @@ type SnapshotComponent struct {
 	ID         int64
 	SnapshotID int64
 	Component  string
-	GitSha     string
 	ImageUrl   string
-	GitUrl     string
 }
 
-type TestCase struct {
-	ID          int64
-	TestSuiteID int64
-	Name        string
-	Status      string
-	DurationMs  float64
-	Message     string
-	Trace       string
-	FilePath    string
-	Suite       string
-	Retries     int64
-	Flaky       int64
+type StagedSnapshot struct {
+	Name     string
+	Assembly string
+	Kind     string
+	Env      string
 }
 
-type TestSuite struct {
-	ID          int64
-	SnapshotID  int64
-	Name        string
-	Status      string
-	PipelineRun string
-	ToolName    string
-	ToolVersion string
-	Tests       int64
-	Passed      int64
-	Failed      int64
-	Skipped     int64
-	Pending     int64
-	Other       int64
-	Flaky       int64
-	StartTime   int64
-	StopTime    int64
-	DurationMs  int64
-	CreatedAt   string
-}
-
-type Vulnerability struct {
-	ID             int64
-	ReportID       int64
-	Name           string
-	Severity       string
-	PackageName    string
-	PackageVersion string
-	FixedInVersion string
-	Description    string
-	Link           string
-}
-
-type VulnerabilityReport struct {
-	ID         int64
-	SnapshotID int64
-	Component  string
-	Arch       string
-	Total      int64
-	Critical   int64
-	High       int64
-	Medium     int64
-	Low        int64
-	Unknown    int64
-	Fixable    int64
-	CreatedAt  string
+type SyncStatus struct {
+	Source      string
+	LastSuccess time.Time
 }

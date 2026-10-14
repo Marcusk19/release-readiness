@@ -3,25 +3,43 @@ export function jiraIssueUrl(key: string, baseUrl: string): string {
 	return `${baseUrl.replace(/\/+$/, "")}/browse/${key}`;
 }
 
-/**
- * Derive a GitHub commit URL from a Konflux component name and SHA.
- *
- * Component names follow the pattern `{org}-{repo}-v{major}-{minor}`,
- * e.g. `quay-quay-v3-14` -> `https://github.com/quay/quay/commit/{sha}`.
- */
-export function githubCommitUrl(component: string, sha: string): string | null {
-	const stripped = component.replace(/-v\d+-\d+$/, "");
-	const idx = stripped.indexOf("-");
-	if (idx <= 0 || idx >= stripped.length - 1) return null;
-	const org = stripped.substring(0, idx);
-	const repo = stripped.substring(idx + 1);
-	return `https://github.com/${org}/${repo}/commit/${sha}`;
+/** Build a JIRA issue search URL from a JQL query. */
+export function jiraSearchUrl(jql: string, baseUrl: string): string {
+	return `${baseUrl.replace(/\/+$/, "")}/issues/?jql=${encodeURIComponent(jql)}`;
 }
 
-/** Prepend https:// to a quay.io image reference if missing. */
-export function quayImageUrl(imageUrl: string): string | null {
-	if (!imageUrl.startsWith("quay.io/")) return null;
-	return `https://${imageUrl.split("@")[0]}`;
+/** JQL for a version's ticket list: the tickets of its Target Version. */
+export function ticketsJql(project: string, version: string): string {
+	return `project=${project} AND "Target Version"="${version}"`;
+}
+
+/**
+ * Konflux UI page of an application, or of one of its Snapshots or Releases;
+ * null without a base URL, namespace or application.
+ */
+export function konfluxUrl(
+	base: string,
+	ns: string,
+	app: string,
+	kind?: "snapshots" | "releases",
+	name?: string,
+): string | null {
+	if (!base || !ns || !app) return null;
+	const url = `${base.replace(/\/+$/, "")}/ns/${ns}/applications/${app}`;
+	return kind && name ? `${url}/${kind}/${name}` : url;
+}
+
+/**
+ * Sippy's job runs of the quay-X.Y release of a version since an ISO time;
+ * null without an X.Y or a time.
+ */
+export function sippyRunsUrl(version: string, since: string): string | null {
+	const xy = version.match(/(\d+)\.(\d+)/);
+	if (!xy || !since) return null;
+	const filters = JSON.stringify({
+		items: [{ field: "timestamp", operator: ">", value: since }],
+	});
+	return `https://sippy.dptools.openshift.org/sippy-ng/jobs/quay-${xy[1]}.${xy[2]}/runs?filters=${encodeURIComponent(filters)}`;
 }
 
 /**
@@ -29,7 +47,6 @@ export function quayImageUrl(imageUrl: string): string | null {
  *
  * `quay-v3.14.6` -> `Quay v3.14.6`
  * `omr-v2.0.10`  -> `OMR v2.0.10`
- * `3.14.6`       -> `Quay v3.14.6` (bare version)
  */
 export function formatReleaseName(name: string): string {
 	// Pattern: product-vX.Y.Z
@@ -41,9 +58,9 @@ export function formatReleaseName(name: string): string {
 			product.toLowerCase() === "quay" ? "Quay" : product.toUpperCase();
 		return `${label} v${version}`;
 	}
-	// Bare version number (e.g. "3.14.6")
-	if (/^\d/.test(name)) {
-		return `Quay v${name}`;
-	}
 	return name;
 }
+
+/** ART pipeline health view for the Quay tenant (needs an artc2023 browser login). */
+export const ART_PIPELINES_HEALTH_URL =
+	"https://art-pipelines-ui-art-pipelines-ui.apps.artc2023.pc3z.p1.openshiftapps.com/#/health?namespace=art-quay-tenant";

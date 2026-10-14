@@ -1,0 +1,112 @@
+// Package artbuild links component images to their records in the public ART
+// build history service.
+package artbuild
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strings"
+)
+
+// Client reads the ART build history service.
+type Client struct {
+	baseURL string
+	http    *http.Client
+}
+
+func NewClient(baseURL string, hc *http.Client) *Client {
+	return &Client{baseURL: strings.TrimRight(baseURL, "/"), http: hc}
+}
+
+// searchBuild is one row of a /search listing. Pending rows have no image.
+type searchBuild struct {
+	NVR           string `json:"nvr"`
+	RecordID      string `json:"record_id"`
+	ImagePullspec string `json:"image_pullspec"`
+	Name          string `json:"name"`
+	Outcome       string `json:"outcome"`
+}
+
+// record is a full /build record.
+type record struct {
+	NVR           string `json:"nvr"`
+	RecordID      string `json:"record_id"`
+	ImagePullspec string `json:"image_pullspec"`
+	// Commitish is the source commit ART built from.
+	Commitish string `json:"commitish"`
+	// BuildPipelineURL is the build PipelineRun's Konflux UI page.
+	BuildPipelineURL string `json:"build_pipeline_url"`
+	// BundleNVRs is, for an FBC image, the operator bundles its catalog holds.
+	BundleNVRs []string `json:"bundle_nvrs"`
+	Outcome    string   `json:"outcome"`
+	StartTime  string   `json:"start_time"`
+	// OperatorNVR and OperandNVRs are, for a bundle image, the images its
+	// CSV deploys.
+	OperatorNVR string   `json:"operator_nvr"`
+	OperandNVRs []string `json:"operand_nvrs"`
+}
+
+// search returns the rows of a /search listing and the warnings the service
+// gave with them.
+func (c *Client) search(ctx context.Context, q url.Values) ([]searchBuild, []string, error) {
+	var resp struct {
+		Builds   []searchBuild `json:"builds"`
+		Warnings []string      `json:"warnings"`
+		Error    string        `json:"error"`
+	}
+	if err := c.get(ctx, "/search?"+q.Encode(), &resp); err != nil {
+		return nil, nil, err
+	}
+	if resp.Error != "" {
+		return nil, nil, fmt.Errorf("search: %s", resp.Error)
+	}
+	return resp.Builds, resp.Warnings, nil
+}
+
+func (c *Client) record(ctx context.Context, nvr, recordID string) (*record, error) {
+	var r record
+	if err := c.get(ctx, "/build?"+recordQuery(nvr, recordID)+"&format=json", &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// BuildPipelineURL returns the Konflux UI page of the PipelineRun that built
+// a record, "" when the record has none.
+func (c *Client) BuildPipelineURL(ctx context.Context, nvr, recordID string) (string, error) {
+	r, err := c.record(ctx, nvr, recordID)
+	if err != nil {
+		return "", err
+	}
+	return r.BuildPipelineURL, nil
+}
+
+func (c *Client) get(ctx context.Context, path string, v any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	// /search answers with HTML unless the request looks like the page's own XHR.
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("GET %s: %s", path, resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(v)
+}
+
+// PageURL is a record's human build page on the service.
+func PageURL(baseURL, nvr, recordID string) string {
+	return strings.TrimRight(baseURL, "/") + "/build?" + recordQuery(nvr, recordID)
+}
+
+func recordQuery(nvr, recordID string) string {
+	return url.Values{"nvr": {nvr}, "record_id": {recordID}}.Encode()
+}

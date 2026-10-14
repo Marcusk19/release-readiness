@@ -18,160 +18,49 @@ func (q *Queries) DeleteAllJiraIssuesForVersion(ctx context.Context, fixVersion 
 	return err
 }
 
-const getIssueSummary = `-- name: GetIssueSummary :one
-SELECT
-    CAST(COUNT(*) AS INTEGER) AS total,
-    CAST(COALESCE(SUM(CASE WHEN LOWER(status) IN ('closed', 'verified', 'done') THEN 1 ELSE 0 END), 0) AS INTEGER) AS verified,
-    CAST(COALESCE(SUM(CASE WHEN LOWER(status) NOT IN ('closed', 'verified', 'done') THEN 1 ELSE 0 END), 0) AS INTEGER) AS open,
-    CAST(COALESCE(SUM(CASE WHEN LOWER(issue_type) = 'vulnerability' OR LOWER(labels) LIKE '%cve%' THEN 1 ELSE 0 END), 0) AS INTEGER) AS cves,
-    CAST(COALESCE(SUM(CASE WHEN LOWER(issue_type) = 'bug' THEN 1 ELSE 0 END), 0) AS INTEGER) AS bugs
-FROM jira_issues
-WHERE fix_version = ?
-`
-
-type GetIssueSummaryRow struct {
-	Total    int64
-	Verified int64
-	Open     int64
-	Cves     int64
-	Bugs     int64
-}
-
-func (q *Queries) GetIssueSummary(ctx context.Context, fixVersion string) (GetIssueSummaryRow, error) {
-	row := q.db.QueryRowContext(ctx, getIssueSummary, fixVersion)
-	var i GetIssueSummaryRow
-	err := row.Scan(
-		&i.Total,
-		&i.Verified,
-		&i.Open,
-		&i.Cves,
-		&i.Bugs,
-	)
-	return i, err
-}
-
 const getReleaseVersion = `-- name: GetReleaseVersion :one
-SELECT name, description, release_date, released, archived, release_ticket_key, release_ticket_assignee, s3_application, due_date
-FROM release_versions WHERE name = ?
+SELECT id, name, release_date, released, archived, release_ticket_key, release_ticket_assignee, konflux_application, due_date FROM release_versions WHERE name = ?
 `
 
-type GetReleaseVersionRow struct {
-	Name                  string
-	Description           string
-	ReleaseDate           string
-	Released              int64
-	Archived              int64
-	ReleaseTicketKey      string
-	ReleaseTicketAssignee string
-	S3Application         string
-	DueDate               string
-}
-
-func (q *Queries) GetReleaseVersion(ctx context.Context, name string) (GetReleaseVersionRow, error) {
+func (q *Queries) GetReleaseVersion(ctx context.Context, name string) (ReleaseVersion, error) {
 	row := q.db.QueryRowContext(ctx, getReleaseVersion, name)
-	var i GetReleaseVersionRow
+	var i ReleaseVersion
 	err := row.Scan(
+		&i.ID,
 		&i.Name,
-		&i.Description,
 		&i.ReleaseDate,
 		&i.Released,
 		&i.Archived,
 		&i.ReleaseTicketKey,
 		&i.ReleaseTicketAssignee,
-		&i.S3Application,
+		&i.KonfluxApplication,
 		&i.DueDate,
 	)
 	return i, err
 }
 
-const listActiveReleaseVersions = `-- name: ListActiveReleaseVersions :many
-SELECT name, description, release_date, released, archived, release_ticket_key, release_ticket_assignee, s3_application, due_date
-FROM release_versions
-WHERE released = 0 AND archived = 0
-ORDER BY name
-`
-
-type ListActiveReleaseVersionsRow struct {
-	Name                  string
-	Description           string
-	ReleaseDate           string
-	Released              int64
-	Archived              int64
-	ReleaseTicketKey      string
-	ReleaseTicketAssignee string
-	S3Application         string
-	DueDate               string
-}
-
-func (q *Queries) ListActiveReleaseVersions(ctx context.Context) ([]ListActiveReleaseVersionsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listActiveReleaseVersions)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListActiveReleaseVersionsRow
-	for rows.Next() {
-		var i ListActiveReleaseVersionsRow
-		if err := rows.Scan(
-			&i.Name,
-			&i.Description,
-			&i.ReleaseDate,
-			&i.Released,
-			&i.Archived,
-			&i.ReleaseTicketKey,
-			&i.ReleaseTicketAssignee,
-			&i.S3Application,
-			&i.DueDate,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listAllReleaseVersions = `-- name: ListAllReleaseVersions :many
-SELECT name, description, release_date, released, archived, release_ticket_key, release_ticket_assignee, s3_application, due_date
-FROM release_versions
-ORDER BY name
+SELECT id, name, release_date, released, archived, release_ticket_key, release_ticket_assignee, konflux_application, due_date FROM release_versions ORDER BY name
 `
 
-type ListAllReleaseVersionsRow struct {
-	Name                  string
-	Description           string
-	ReleaseDate           string
-	Released              int64
-	Archived              int64
-	ReleaseTicketKey      string
-	ReleaseTicketAssignee string
-	S3Application         string
-	DueDate               string
-}
-
-func (q *Queries) ListAllReleaseVersions(ctx context.Context) ([]ListAllReleaseVersionsRow, error) {
+func (q *Queries) ListAllReleaseVersions(ctx context.Context) ([]ReleaseVersion, error) {
 	rows, err := q.db.QueryContext(ctx, listAllReleaseVersions)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var items []ListAllReleaseVersionsRow
+	var items []ReleaseVersion
 	for rows.Next() {
-		var i ListAllReleaseVersionsRow
+		var i ReleaseVersion
 		if err := rows.Scan(
+			&i.ID,
 			&i.Name,
-			&i.Description,
 			&i.ReleaseDate,
 			&i.Released,
 			&i.Archived,
 			&i.ReleaseTicketKey,
 			&i.ReleaseTicketAssignee,
-			&i.S3Application,
+			&i.KonfluxApplication,
 			&i.DueDate,
 		); err != nil {
 			return nil, err
@@ -188,90 +77,66 @@ func (q *Queries) ListAllReleaseVersions(ctx context.Context) ([]ListAllReleaseV
 }
 
 const upsertJiraIssue = `-- name: UpsertJiraIssue :exec
-INSERT INTO jira_issues (key, summary, status, priority, labels, fix_version, assignee, issue_type, resolution, link, qa_contact, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO jira_issues (key, summary, fix_version, issue_type, link)
+VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(key, fix_version) DO UPDATE SET
     summary=excluded.summary,
-    status=excluded.status,
-    priority=excluded.priority,
-    labels=excluded.labels,
-    assignee=excluded.assignee,
     issue_type=excluded.issue_type,
-    resolution=excluded.resolution,
-    link=excluded.link,
-    qa_contact=excluded.qa_contact,
-    updated_at=excluded.updated_at
+    link=excluded.link
 `
 
 type UpsertJiraIssueParams struct {
 	Key        string
 	Summary    string
-	Status     string
-	Priority   string
-	Labels     string
 	FixVersion string
-	Assignee   string
 	IssueType  string
-	Resolution string
 	Link       string
-	QaContact  string
-	UpdatedAt  string
 }
 
 func (q *Queries) UpsertJiraIssue(ctx context.Context, arg UpsertJiraIssueParams) error {
 	_, err := q.db.ExecContext(ctx, upsertJiraIssue,
 		arg.Key,
 		arg.Summary,
-		arg.Status,
-		arg.Priority,
-		arg.Labels,
 		arg.FixVersion,
-		arg.Assignee,
 		arg.IssueType,
-		arg.Resolution,
 		arg.Link,
-		arg.QaContact,
-		arg.UpdatedAt,
 	)
 	return err
 }
 
 const upsertReleaseVersion = `-- name: UpsertReleaseVersion :exec
-INSERT INTO release_versions (name, description, release_date, released, archived, release_ticket_key, release_ticket_assignee, s3_application, due_date)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO release_versions (name, release_date, released, archived, release_ticket_key, release_ticket_assignee, konflux_application, due_date)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(name) DO UPDATE SET
-    description=excluded.description,
     release_date=excluded.release_date,
     released=excluded.released,
     archived=excluded.archived,
     release_ticket_key=excluded.release_ticket_key,
     release_ticket_assignee=excluded.release_ticket_assignee,
-    s3_application=excluded.s3_application,
+    konflux_application=excluded.konflux_application,
     due_date=excluded.due_date
 `
 
 type UpsertReleaseVersionParams struct {
 	Name                  string
-	Description           string
 	ReleaseDate           string
 	Released              int64
 	Archived              int64
 	ReleaseTicketKey      string
 	ReleaseTicketAssignee string
-	S3Application         string
+	KonfluxApplication    string
 	DueDate               string
 }
 
 func (q *Queries) UpsertReleaseVersion(ctx context.Context, arg UpsertReleaseVersionParams) error {
 	_, err := q.db.ExecContext(ctx, upsertReleaseVersion,
 		arg.Name,
-		arg.Description,
 		arg.ReleaseDate,
 		arg.Released,
 		arg.Archived,
 		arg.ReleaseTicketKey,
 		arg.ReleaseTicketAssignee,
-		arg.S3Application,
+		arg.KonfluxApplication,
 		arg.DueDate,
 	)
 	return err

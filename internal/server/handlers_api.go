@@ -1,11 +1,9 @@
 package server
 
 import (
-	"archive/tar"
-	"compress/gzip"
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -13,12 +11,17 @@ import (
 	"time"
 
 	"github.com/quay/release-readiness/internal/model"
+	"github.com/quay/release-readiness/internal/syncstatus"
 )
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
-		"jira_base_url": s.jiraBaseURL,
-		"jira_project":  s.jiraProject,
+	// The JIRA sync is tracked only when the server was started with a token.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jira_base_url":     s.jiraBaseURL,
+		"jira_project":      s.jiraProject,
+		"jira_enabled":      s.syncStatus.Tracks("jira"),
+		"konflux_ui_url":    s.KonfluxUIURL,
+		"konflux_namespace": s.KonfluxNamespace,
 	})
 }
 
@@ -30,21 +33,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "healthy"})
 }
 
-// --- Snapshots ---
-
-func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	limit, _ := strconv.Atoi(q.Get("limit"))
-	offset, _ := strconv.Atoi(q.Get("offset"))
-	if limit <= 0 {
-		limit = 50
-	}
-	snapshots, err := s.db.ListSnapshots(r.Context(), q.Get("application"), limit, offset)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, snapshots)
+func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, struct {
+		Problems []syncstatus.Problem   `json:"problems"`
+		Sources  []syncstatus.Freshness `json:"sources"`
+	}{s.syncStatus.Problems(time.Now()), s.syncStatus.Sources()})
 }
 
 // --- Releases (version-centric) ---
@@ -59,51 +52,8 @@ func (s *Server) handleGetRelease(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, release)
 }
 
-func (s *Server) handleGetReleaseSnapshot(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	version := r.PathValue("version")
-	release, err := s.db.GetReleaseVersion(ctx, version)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("release %q not found", version))
-		return
-	}
-
-	if release.S3Application == "" {
-		writeError(w, http.StatusNotFound, fmt.Errorf("no S3 application mapped for release %q", version))
-		return
-	}
-
-	// Get the latest snapshot for this release's S3 application
-	apps, err := s.db.LatestSnapshotPerApplication(ctx)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	for _, app := range apps {
-		if app.Application == release.S3Application {
-			if app.LatestSnapshot == nil {
-				writeError(w, http.StatusNotFound, fmt.Errorf("no snapshots found for %s", release.S3Application))
-				return
-			}
-			// Get full snapshot with components and test results
-			snap, err := s.db.GetSnapshotByName(ctx, app.LatestSnapshot.Name)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-			writeJSON(w, http.StatusOK, snap)
-			return
-		}
-	}
-
-	writeError(w, http.StatusNotFound, fmt.Errorf("no snapshots found for application %s", release.S3Application))
-}
-
 func (s *Server) handleListReleaseIssues(w http.ResponseWriter, r *http.Request) {
-	version := r.PathValue("version")
-	q := r.URL.Query()
-	issues, err := s.db.ListJiraIssues(r.Context(), version, q.Get("type"), q.Get("status"), q.Get("label"))
+	issues, err := s.db.ListJiraIssues(r.Context(), r.PathValue("version"))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -114,44 +64,54 @@ func (s *Server) handleListReleaseIssues(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, issues)
 }
 
-func (s *Server) handleGetReleaseIssueSummary(w http.ResponseWriter, r *http.Request) {
-	version := r.PathValue("version")
-	summary, err := s.db.GetIssueSummary(r.Context(), version)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, summary)
+// streamBuilds is an application's stream builds, newest first, and the NVRs
+// of their images, as db.StreamBuilds returns them.
+type streamBuilds struct {
+	builds []model.ReleaseSnapshot
+	nvrs   map[string]string
 }
 
-func (s *Server) handleGetReleaseReadiness(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	version := r.PathValue("version")
-
-	release, err := s.db.GetReleaseVersion(ctx, version)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("release %q not found", version))
-		return
+// latestBuild returns when the version's newest build was created: the newer
+// of its newest build and its selected STAGE build, or nil when it has
+// neither. streams keeps each application's stream builds once read.
+func (s *Server) latestBuild(ctx context.Context, release *model.ReleaseVersion, streams map[string]streamBuilds) (*time.Time, error) {
+	app := release.KonfluxApplication
+	m := quayVersion.FindStringSubmatch(release.Name)
+	if app == "" || m == nil {
+		return nil, nil
 	}
-
-	issueSummary, _ := s.db.GetIssueSummary(ctx, version)
-
-	testsPassed := false
-	hasTests := false
-	if release.S3Application != "" {
-		apps, err := s.db.LatestSnapshotPerApplication(ctx)
-		if err == nil {
-			for _, app := range apps {
-				if app.Application == release.S3Application && app.LatestSnapshot != nil {
-					testsPassed = app.LatestSnapshot.TestsPassed
-					hasTests = app.LatestSnapshot.HasTests
-					break
-				}
-			}
+	st, ok := streams[app]
+	if !ok {
+		builds, nvrs, err := s.db.StreamBuilds(ctx, app)
+		if err != nil {
+			return nil, err
 		}
+		st = streamBuilds{builds, nvrs}
+		streams[app] = st
 	}
+	var latest *time.Time
+	if builds := versionBuilds(app, st.builds, st.nvrs, m[1]); len(builds) > 0 {
+		latest = &builds[0].CreatedAt
+	}
+	staged, err := s.db.SelectedStageBuild(ctx, release, s.StageReleasePlanPattern)
+	if err != nil || staged == nil {
+		return latest, err
+	}
+	snap, err := s.db.GetReleaseSnapshot(ctx, staged.SnapshotName)
+	if err != nil {
+		return nil, err
+	}
+	if latest == nil || snap.CreatedAt.After(*latest) {
+		latest = &snap.CreatedAt
+	}
+	return latest, nil
+}
 
-	writeJSON(w, http.StatusOK, computeReadiness(release, issueSummary, testsPassed, hasTests))
+// catalogShipped reports whether the catalog publishes the fixVersion, e.g.
+// quay-v3.17.5 as quay 3.17.5.
+func (s *Server) catalogShipped(name string) bool {
+	product, version, _ := strings.Cut(name, "-v")
+	return s.shipped.Has(product, version)
 }
 
 func (s *Server) handleReleasesOverview(w http.ResponseWriter, r *http.Request) {
@@ -160,21 +120,6 @@ func (s *Server) handleReleasesOverview(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	if releases == nil {
-		releases = []model.ReleaseVersion{}
-	}
-
-	apps, err := s.db.LatestSnapshotPerApplication(ctx)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	snapshotMap := make(map[string]*model.SnapshotRecord, len(apps))
-	for i := range apps {
-		if apps[i].LatestSnapshot != nil {
-			snapshotMap[apps[i].Application] = apps[i].LatestSnapshot
-		}
 	}
 
 	fixVersions := make([]string, len(releases))
@@ -187,152 +132,99 @@ func (s *Server) handleReleasesOverview(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	streams := map[string]streamBuilds{}
 	overviews := make([]model.ReleaseOverview, len(releases))
 	for i, rel := range releases {
 		summary := issueSummaries[rel.Name]
-		var snap *model.SnapshotRecord
-		testsPassed := false
-		hasTests := false
-		if rel.S3Application != "" {
-			if s := snapshotMap[rel.S3Application]; s != nil {
-				// Return snapshot metadata only (no components/test_results)
-				snapCopy := *s
-				snapCopy.Components = nil
-				snapCopy.TestSuites = nil
-				snap = &snapCopy
-				testsPassed = s.TestsPassed
-				hasTests = s.HasTests
-			}
+		latest, err := s.latestBuild(ctx, &rel, streams)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
-
+		catalogShipped := s.catalogShipped(rel.Name)
 		overviews[i] = model.ReleaseOverview{
 			Release:      rel,
 			IssueSummary: summary,
-			Readiness:    computeReadiness(&rel, summary, testsPassed, hasTests),
-			Snapshot:     snap,
+			Readiness:    computeReadiness(&rel, latest != nil, catalogShipped, time.Now()),
+			LatestBuild:  latest,
+			Shipped:      catalogShipped || rel.Released,
 		}
 	}
+	markNextInStream(overviews)
 
 	writeJSON(w, http.StatusOK, overviews)
 }
 
+// markNextInStream flags the lowest unshipped z of each product and
+// major.minor, e.g. quay 3.18 for quay-v3.18.2. A name that does not parse
+// is a stream of its own.
+func markNextInStream(overviews []model.ReleaseOverview) {
+	type candidate struct{ i, z int }
+	next := make(map[string]candidate)
+	for i, ov := range overviews {
+		if ov.Shipped {
+			continue
+		}
+		stream, z := ov.Release.Name, 0
+		product, version, _ := strings.Cut(ov.Release.Name, "-v")
+		if parts := strings.Split(version, "."); len(parts) == 3 {
+			if n, err := strconv.Atoi(parts[2]); err == nil {
+				stream, z = product+" "+parts[0]+"."+parts[1], n
+			}
+		}
+		if c, ok := next[stream]; !ok || z < c.z {
+			next[stream] = candidate{i, z}
+		}
+	}
+	for _, c := range next {
+		overviews[c.i].NextInStream = true
+	}
+}
+
 // computeReadiness derives a readiness signal from release metadata,
-// issue summary, and test status.
-func computeReadiness(release *model.ReleaseVersion, issueSummary *model.IssueSummary, testsPassed, hasTests bool) model.ReadinessResponse {
+// whether a build snapshot exists, and whether the catalog already
+// publishes it (JIRA can lag a shipped release). A version with nothing to
+// flag gets an empty signal and message.
+func computeReadiness(release *model.ReleaseVersion, hasSnapshot, catalogShipped bool, now time.Time) model.ReadinessResponse {
 	if release.Released {
 		return model.ReadinessResponse{Signal: "green", Message: "Released"}
 	}
+	if catalogShipped {
+		return model.ReadinessResponse{Signal: "green", Message: "Shipped"}
+	}
 
-	now := time.Now()
-	signal := "green"
-	message := "All checks passing"
+	var signal, message string
 
-	openIssues := issueSummary != nil && issueSummary.Open > 0
-	testsFailing := hasTests && !testsPassed
+	// Due dates are midnight UTC. Count whole UTC days, as the version page
+	// does, so a version is due today until its due day ends.
+	const day = 24 * time.Hour
+	var daysUntil int
+	if release.DueDate != nil {
+		daysUntil = int(release.DueDate.Truncate(day).Sub(now.Truncate(day)) / day)
+	}
+	// Builds are found only for a version ART builds, a quay-vX.Y.Z with a
+	// Konflux application; no other version ever has one.
+	tracked := release.KonfluxApplication != "" && quayVersion.MatchString(release.Name)
 
-	if release.DueDate != nil && now.After(*release.DueDate) {
+	if release.DueDate != nil && daysUntil < 0 {
 		signal = "red"
 		message = "Past due date"
-	} else if testsFailing && openIssues {
-		signal = "red"
-		message = "Tests failing and open issues remain"
-	} else if testsFailing {
+	} else if tracked && !hasSnapshot {
 		signal = "yellow"
-		message = "Integration tests failing"
-	} else if openIssues {
+		message = "No build snapshots yet"
+	} else if release.DueDate != nil && daysUntil <= 3 {
 		signal = "yellow"
-		message = "Open issues remain"
-	} else if release.DueDate != nil {
-		daysUntil := int(release.DueDate.Sub(now).Hours() / 24)
-		if daysUntil <= 3 {
-			signal = "yellow"
-			message = fmt.Sprintf("Due date in %d days", daysUntil)
+		switch daysUntil {
+		case 0:
+			message = "Due today"
+		case 1:
+			message = "Due in 1 day"
+		default:
+			message = fmt.Sprintf("Due in %d days", daysUntil)
 		}
 	}
 
 	return model.ReadinessResponse{Signal: signal, Message: message}
-}
-
-// --- Artifacts ---
-
-func (s *Server) handleDownloadSuiteArtifacts(w http.ResponseWriter, r *http.Request) {
-	if s.s3 == nil {
-		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("S3 not configured"))
-		return
-	}
-
-	snapshotID, err := strconv.ParseInt(r.PathValue("snapshotId"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid snapshot ID"))
-		return
-	}
-	suiteID, err := strconv.ParseInt(r.PathValue("suiteId"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid suite ID"))
-		return
-	}
-
-	ctx := r.Context()
-
-	snap, err := s.db.GetSnapshotByID(ctx, snapshotID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("snapshot %d not found", snapshotID))
-		return
-	}
-
-	suite, err := s.db.GetTestSuiteByID(ctx, suiteID)
-	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Errorf("test suite %d not found", suiteID))
-		return
-	}
-	if suite.SnapshotID != snapshotID {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("suite %d does not belong to snapshot %d", suiteID, snapshotID))
-		return
-	}
-
-	prefix := snap.Application + "/snapshots/" + snap.Name + "/" + suite.Name + "/"
-	keys, err := s.s3.ListObjects(ctx, prefix)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("listing artifacts: %w", err))
-		return
-	}
-	if len(keys) == 0 {
-		writeError(w, http.StatusNotFound, fmt.Errorf("no artifacts found for suite %q", suite.Name))
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/gzip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s-artifacts.tar.gz"`, suite.Name))
-
-	gw := gzip.NewWriter(w)
-	defer func() { _ = gw.Close() }()
-	tw := tar.NewWriter(gw)
-	defer func() { _ = tw.Close() }()
-
-	for _, key := range keys {
-		body, size, err := s.s3.GetObjectStream(ctx, key)
-		if err != nil {
-			s.logger.Error("fetch artifact", "key", key, "error", err)
-			continue
-		}
-
-		relPath := strings.TrimPrefix(key, prefix)
-		if err := tw.WriteHeader(&tar.Header{
-			Name: relPath,
-			Size: size,
-			Mode: 0o644,
-		}); err != nil {
-			_ = body.Close()
-			s.logger.Error("write tar header", "key", key, "error", err)
-			return
-		}
-		if _, err := io.Copy(tw, body); err != nil {
-			_ = body.Close()
-			s.logger.Error("write tar body", "key", key, "error", err)
-			return
-		}
-		_ = body.Close()
-	}
 }
 
 // --- Helpers ---

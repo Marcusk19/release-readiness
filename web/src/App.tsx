@@ -2,6 +2,10 @@ import {
 	Bullseye,
 	Button,
 	Content,
+	DescriptionList,
+	DescriptionListDescription,
+	DescriptionListGroup,
+	DescriptionListTerm,
 	Masthead,
 	MastheadBrand,
 	MastheadContent,
@@ -14,19 +18,48 @@ import {
 	ToolbarItem,
 } from "@patternfly/react-core";
 import {
+	ExternalLinkAltIcon,
 	MoonIcon,
 	OutlinedQuestionCircleIcon,
 	SunIcon,
 } from "@patternfly/react-icons";
 import { lazy, Suspense, useEffect, useState } from "react";
-import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import "@patternfly/react-core/dist/styles/base.css";
 import ErrorBoundary from "./components/ErrorBoundary";
+import SyncStatusWarning from "./components/SyncStatusWarning";
 import "./theme.css";
+import { ART_PIPELINES_HEALTH_URL } from "./utils/links";
 
 const ReleasesOverview = lazy(() => import("./pages/ReleasesOverview"));
 const ReleaseDetail = lazy(() => import("./pages/ReleaseDetail"));
-const SnapshotsList = lazy(() => import("./pages/SnapshotsList"));
+const ReleaseCI = lazy(() => import("./pages/ReleaseCI"));
+// Dev builds only: the condition is false in a production build, so the
+// mockups chunk is never emitted.
+const Mockups = import.meta.env.DEV ? lazy(() => import("./mockups")) : null;
+
+const glossary: [string, string][] = [
+	[
+		"Release candidate",
+		"The pinned build that ships: the build release-from-fbc last staged for the version, whose stage Release succeeded. Running release-from-fbc with a build picks it.",
+	],
+	[
+		"Staged",
+		"In the version's stage release, a Konflux Release through the stream's quay-advisory-stage-X-Y plan. Only the release candidate is.",
+	],
+	[
+		"In CI",
+		"Reached the catalog CI installs from: a stage Release holding its operator bundle succeeded, a per-build fbc-ri-stage Release or the version's image shipment.",
+	],
+	[
+		"CI",
+		"Periodic Prow jobs, grouped by the build each installed: from its tested-images.json, or for runs before 2026-10-09 its olm-csvs.yaml.",
+	],
+	[
+		"z-stream",
+		"The patch releases of one minor version, e.g. 3.18.z. The next release per stream is its lowest unshipped z.",
+	],
+];
 
 type Theme = "light" | "dark";
 
@@ -76,27 +109,44 @@ function AppLayout({ children }: { children: React.ReactNode }) {
 				<Toolbar>
 					<ToolbarContent>
 						<ToolbarItem align={{ default: "alignEnd" }}>
+							<SyncStatusWarning />
+						</ToolbarItem>
+						<ToolbarItem>
+							<Button
+								component="a"
+								variant="plain"
+								href={ART_PIPELINES_HEALTH_URL}
+								target="_blank"
+								rel="noopener noreferrer"
+								aria-label="ART pipelines health (opens in a new tab)"
+								icon={<ExternalLinkAltIcon />}
+								iconPosition="end"
+							>
+								ART pipelines
+							</Button>
+						</ToolbarItem>
+						<ToolbarItem>
 							<Popover
 								headerContent="About this dashboard"
+								maxWidth="36rem"
 								bodyContent={
-									<Content>
+									<>
 										<Content component="p">
-											Tracks release readiness for Quay by combining two data
-											sources:
+											One page per version answers: can it ship? Data: Konflux
+											Snapshots and Releases, ART build history, Prow periodics,
+											Jira.
 										</Content>
-										<Content component="ul">
-											<Content component="li">
-												<strong>JIRA</strong> — syncs active releases by Target
-												Version and their issues. Tracks status, priority, type,
-												and assignee to compute a readiness signal.
-											</Content>
-											<Content component="li">
-												<strong>Build Snapshots</strong> — polls S3 for Konflux
-												snapshot manifests. Each contains component builds (git
-												SHA, image) and JUnit test results.
-											</Content>
-										</Content>
-									</Content>
+										<DescriptionList isCompact style={{ marginTop: "1rem" }}>
+											{glossary.map(([term, desc]) => (
+												<DescriptionListGroup key={term}>
+													<DescriptionListTerm>{term}</DescriptionListTerm>
+													<DescriptionListDescription>
+														{desc}
+													</DescriptionListDescription>
+												</DescriptionListGroup>
+											))}
+										</DescriptionList>
+									</>
 								}
 							>
 								<Button variant="plain" aria-label="About this dashboard">
@@ -137,10 +187,12 @@ export default function App() {
 						<Routes>
 							<Route path="/" element={<ReleasesOverview />} />
 							<Route path="/releases/:version" element={<ReleaseDetail />} />
+							<Route path="/releases/:version/ci" element={<ReleaseCI />} />
 							<Route
 								path="/releases/:version/snapshots"
-								element={<SnapshotsList />}
+								element={<Navigate to=".." relative="path" replace />}
 							/>
+							{Mockups && <Route path="/mockups/*" element={<Mockups />} />}
 						</Routes>
 					</Suspense>
 				</ErrorBoundary>

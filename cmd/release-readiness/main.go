@@ -1,45 +1,86 @@
 package main
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"sync"
 	"syscall"
 	"time"
 
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/transport"
+
+	"github.com/quay/release-readiness/internal/artbuild"
+	"github.com/quay/release-readiness/internal/catalog"
 	"github.com/quay/release-readiness/internal/db"
+	"github.com/quay/release-readiness/internal/fbc"
 	"github.com/quay/release-readiness/internal/jira"
-	s3client "github.com/quay/release-readiness/internal/s3"
+	"github.com/quay/release-readiness/internal/kube"
+	"github.com/quay/release-readiness/internal/prow"
+	"github.com/quay/release-readiness/internal/scan"
 	"github.com/quay/release-readiness/internal/server"
+	"github.com/quay/release-readiness/internal/syncstatus"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "dashboard.db", "SQLite database path")
 
-	// S3 flags
-	s3Endpoint := flag.String("s3-endpoint", os.Getenv("S3_ENDPOINT"), "S3 endpoint URL (e.g. http://localhost:3900)")
-	s3Region := flag.String("s3-region", envOrDefault("S3_REGION", "us-east-1"), "S3 region")
-	s3Bucket := flag.String("s3-bucket", os.Getenv("S3_BUCKET"), "S3 bucket name")
-	s3AccessKey := flag.String("s3-access-key", os.Getenv("AWS_ACCESS_KEY_ID"), "S3 access key")
-	s3SecretKey := flag.String("s3-secret-key", os.Getenv("AWS_SECRET_ACCESS_KEY"), "S3 secret key")
-	s3PollInterval := flag.Duration("s3-poll-interval", 30*time.Second, "S3 sync poll interval")
+	// Konflux flags
+	kubeconfig := flag.String("kubeconfig", os.Getenv("KUBECONFIG"), "kubeconfig path (empty uses the in-cluster service account)")
+	namespace := flag.String("namespace", cmp.Or(os.Getenv("KONFLUX_NAMESPACE"), "art-quay-tenant"), "Konflux namespace to read Snapshots and Releases from")
+	konfluxPollInterval := flag.Duration("konflux-poll-interval", 30*time.Second, "Konflux sync poll interval")
+	konfluxUIURL := flag.String("konflux-ui-url", cmp.Or(os.Getenv("KONFLUX_UI_URL"), "https://konflux-ui.apps.kflux-ocp-p01.7ayg.p1.openshiftapps.com"), "Konflux UI URL for links to -namespace's applications, Snapshots and Releases (empty disables Konflux links)")
 
 	// JIRA flags
-	jiraURL := flag.String("jira-url", envOrDefault("JIRA_URL", "https://redhat.atlassian.net"), "JIRA Cloud URL")
+	jiraURL := flag.String("jira-url", cmp.Or(os.Getenv("JIRA_URL"), "https://redhat.atlassian.net"), "JIRA Cloud URL")
+	jiraAPIURL := flag.String("jira-api-url", os.Getenv("JIRA_API_URL"), "JIRA REST API base URL (defaults to -jira-url; use https://api.atlassian.com/ex/jira/<cloudId> for scoped API tokens)")
 	jiraEmail := flag.String("jira-email", os.Getenv("JIRA_EMAIL"), "JIRA Cloud account email for API token auth")
 	jiraToken := flag.String("jira-token", os.Getenv("JIRA_TOKEN"), "JIRA Cloud API token")
-	jiraProject := flag.String("jira-project", envOrDefault("JIRA_PROJECT", "PROJQUAY"), "JIRA project key")
-	jiraQAContactField := flag.String("jira-qa-contact-field", envOrDefault("JIRA_QA_CONTACT_FIELD", "customfield_12315948"), "JIRA custom field name for QA Contact")
+	jiraProject := flag.String("jira-project", cmp.Or(os.Getenv("JIRA_PROJECT"), "PROJQUAY"), "JIRA project key")
 	jiraPollInterval := flag.Duration("jira-poll-interval", 5*time.Minute, "JIRA sync poll interval")
+
+	// ART build history flags
+	artURL := flag.String("art-build-history-url", "https://art-build-history-art-build-history.apps.artc2023.pc3z.p1.openshiftapps.com", "ART build history service URL (empty disables ART build links)")
+
+	// Tekton Results flags
+	resultsURL := flag.String("tekton-results-url", "https://tekton-results-tekton-results.apps.kflux-ocp-p01.7ayg.p1.openshiftapps.com", "Tekton Results API URL to read the CVE scans of candidate images from with the Konflux credential (empty disables)")
+
+	// Red Hat container catalog flags
+	catalogURL := flag.String("catalog-url", "https://catalog.redhat.com/api/containers/v1", "Red Hat container catalog API URL (empty leaves JIRA's released flag as the only shipped signal)")
+
+	// Prow flags
+	prowJobs := flag.String("prow-jobs", os.Getenv("PROW_JOBS"), "periodic Prow jobs to ingest, as job_name=konflux_application[,...] (e.g. ...-aws-s3-nightly=quay-3-18)")
+	prowInterval := flag.Duration("prow-interval", 15*time.Minute, "Prow sync poll interval")
+
+	// Selected STAGE build flags
+	stagePlanPattern := flag.String("stage-release-plan-pattern", cmp.Or(os.Getenv("STAGE_RELEASE_PLAN_PATTERN"), `^quay-advisory-stage-\d+-\d+$`), "regexp matching the Konflux ReleasePlan names whose Releases are image STAGE (empty selects no staged build)")
 
 	flag.Parse()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
+
+	prowJobList, err := prow.ParseJobs(*prowJobs)
+	if err != nil {
+		logger.Error("parse -prow-jobs", "error", err)
+		os.Exit(1)
+	}
+	var stagePlans *regexp.Regexp
+	if *stagePlanPattern != "" {
+		if stagePlans, err = regexp.Compile(*stagePlanPattern); err != nil {
+			logger.Error("parse -stage-release-plan-pattern", "error", err)
+			os.Exit(1)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -52,60 +93,122 @@ func main() {
 	defer func() { _ = database.Close() }()
 
 	var wg sync.WaitGroup
+	status := syncstatus.New()
+	lastSuccess, err := database.SyncStatus(ctx)
+	if err != nil {
+		logger.Warn("load sync status, last success starts empty", "error", err)
+	}
+	status.Persist(lastSuccess, func(source string, at time.Time) {
+		if err := database.UpsertSyncStatus(ctx, source, at); err != nil {
+			logger.Warn("save sync status", "source", source, "error", err)
+		}
+	})
 
-	var s3c *s3client.Client
-	if *s3Bucket != "" {
-		s3Log := logger.With("component", "s3-sync")
-		s3c, err = s3client.New(ctx, s3client.Config{
-			Endpoint:  *s3Endpoint,
-			Region:    *s3Region,
-			Bucket:    *s3Bucket,
-			AccessKey: *s3AccessKey,
-			SecretKey: *s3SecretKey,
-		}, s3Log)
-		if err != nil {
-			logger.Error("create s3 client", "error", err)
-			os.Exit(1)
-		}
-		logger.Info("s3 sync enabled", "bucket", *s3Bucket, "endpoint", *s3Endpoint, "interval", *s3PollInterval)
-		s3Tx := func(ctx context.Context, fn func(s3client.Store) error) error {
-			return database.InTx(ctx, func(txDB *db.DB) error {
-				return fn(txDB)
-			})
-		}
-		syncer := s3client.NewSyncer(s3c, database, s3Tx, s3Log)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			syncer.Run(ctx, *s3PollInterval)
-		}()
+	kubeCfg, err := kube.RESTConfig(*kubeconfig)
+	var kc *dynamic.DynamicClient
+	if err == nil {
+		kc, err = dynamic.NewForConfig(kubeCfg)
+	}
+	if err != nil {
+		logger.Error("create kubernetes client, konflux sync disabled", "error", err)
+		status.Track("konflux", 0).Report(fmt.Errorf("create kubernetes client: %w", err))
+	} else {
+		konfluxLog := logger.With("component", "konflux-sync")
+		logger.Info("konflux sync enabled", "namespace", *namespace, "interval", *konfluxPollInterval)
+		syncer := kube.NewSyncer(kc, *namespace, database, konfluxLog)
+		syncer.Status = status.Track("konflux", *konfluxPollInterval)
+		wg.Go(func() { syncer.Run(ctx, *konfluxPollInterval) })
 	}
 
 	// Start JIRA sync if token is configured
 	if *jiraToken != "" {
+		apiURL := cmp.Or(*jiraAPIURL, *jiraURL)
 		jiraClient := jira.New(jira.Config{
-			BaseURL:        *jiraURL,
-			Email:          *jiraEmail,
-			Token:          *jiraToken,
-			Project:        *jiraProject,
-			QAContactField: *jiraQAContactField,
+			BaseURL: apiURL,
+			SiteURL: *jiraURL,
+			Email:   *jiraEmail,
+			Token:   *jiraToken,
+			Project: *jiraProject,
 		})
 		jiraLog := logger.With("component", "jira-sync")
-		logger.Info("jira sync enabled", "url", *jiraURL, "project", *jiraProject, "interval", *jiraPollInterval)
+		logger.Info("jira sync enabled", "url", *jiraURL, "api_url", apiURL, "project", *jiraProject, "interval", *jiraPollInterval)
 		jiraTx := func(ctx context.Context, fn func(jira.Store) error) error {
 			return database.InTx(ctx, func(txDB *db.DB) error {
 				return fn(txDB)
 			})
 		}
 		syncer := jira.NewSyncer(jiraClient, database, jiraTx, jiraLog)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			syncer.Run(ctx, *jiraPollInterval)
-		}()
+		syncer.Status = status.Track("jira", *jiraPollInterval)
+		wg.Go(func() { syncer.Run(ctx, *jiraPollInterval) })
 	}
 
-	srv := server.New(database, s3c, *addr, *jiraURL, *jiraProject, logger)
+	var art *artbuild.Client
+	if *artURL != "" {
+		artLog := logger.With("component", "art-resolve")
+		logger.Info("art build history enabled", "url", *artURL)
+		art = artbuild.NewClient(*artURL, &http.Client{Timeout: time.Minute})
+		resolver := artbuild.NewResolver(art, database, artLog)
+		resolver.Status = status.Track("art-builds", 5*time.Minute)
+		wg.Go(func() { resolver.Run(ctx, 5*time.Minute) })
+		history := artbuild.NewHistorySync(art, database, logger.With("component", "art-history"))
+		history.Status = status.Track("art-history", 10*time.Minute)
+		wg.Go(func() { history.Run(ctx, 10*time.Minute) })
+		render := fbc.NewSync(fbc.NewRegistry(&http.Client{Timeout: 5 * time.Minute}), database, history, logger.With("component", "fbc-render"))
+		render.Status = status.Track("fbc-render", 10*time.Minute)
+		wg.Go(func() { render.Run(ctx, 10*time.Minute) })
+	}
+
+	var shipped *catalog.Shipped
+	if *catalogURL != "" {
+		logger.Info("catalog shipped lookup enabled", "url", *catalogURL)
+		shipped = catalog.NewShipped(catalog.NewClient(*catalogURL, &http.Client{Timeout: time.Minute}), logger.With("component", "catalog"))
+		shipped.Status = status.Track("catalog", time.Hour)
+		wg.Go(func() { shipped.Run(ctx, time.Hour) })
+	}
+
+	if len(prowJobList) > 0 {
+		logger.Info("prow sync enabled", "jobs", len(prowJobList), "interval", *prowInterval)
+		syncer := prow.NewSyncer(prow.NewClient(prow.DefaultBaseURL), database, prowJobList, *prowInterval, logger.With("component", "prow-sync"))
+		syncer.Status = status.Track("prow", *prowInterval)
+		wg.Go(func() { syncer.Run(ctx) })
+	}
+
+	srv := server.New(database, *addr, *jiraURL, *jiraProject, *artURL, shipped, status, logger)
+	srv.StageReleasePlanPattern = stagePlans
+	srv.KonfluxUIURL = *konfluxUIURL
+	srv.KonfluxNamespace = *namespace
+
+	if *resultsURL != "" {
+		var rt http.RoundTripper
+		switch {
+		case kc == nil:
+			err = errors.New("no Konflux client")
+		case *artURL == "":
+			err = errors.New("ART build history disabled")
+		case kubeCfg.BearerToken == "" && kubeCfg.BearerTokenFile == "":
+			err = errors.New("the Konflux credential has no bearer token")
+		default:
+			// The system roots, not the cluster CA, verify the Results route.
+			rt, err = transport.NewBearerAuthWithRefreshRoundTripper(kubeCfg.BearerToken, kubeCfg.BearerTokenFile, http.DefaultTransport.(*http.Transport).Clone())
+		}
+		if err != nil {
+			logger.Warn("image scan sync disabled", "error", err)
+		} else {
+			logger.Info("image scan sync enabled", "url", *resultsURL)
+			results := scan.NewClient(*resultsURL, &http.Client{Timeout: time.Minute, Transport: rt})
+			syncer := scan.NewSyncer(results, art, database, srv.CandidateDigests, logger.With("component", "image-scans"))
+			syncer.Status = status.Track("image-scans", 5*time.Minute)
+			wg.Go(func() {
+				// Until the catalog is read, the versions it shipped look
+				// unshipped, and their scans would be read.
+				if shipped != nil {
+					shipped.Refresh(ctx)
+				}
+				syncer.Run(ctx, 5*time.Minute)
+			})
+		}
+	}
+
 	if err := srv.Run(ctx); err != nil {
 		logger.Error("server", "error", err)
 		os.Exit(1)
@@ -113,11 +216,4 @@ func main() {
 
 	wg.Wait()
 	logger.Info("all background tasks stopped")
-}
-
-func envOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

@@ -1,150 +1,156 @@
-import { ColumnManagementModal } from "@patternfly/react-component-groups";
 import {
 	Breadcrumb,
+	BreadcrumbHeading,
 	BreadcrumbItem,
 	Button,
 	Card,
 	CardBody,
 	CardTitle,
+	ClipboardCopy,
 	EmptyState,
 	EmptyStateBody,
 	Flex,
 	FlexItem,
+	FormSelect,
+	FormSelectOption,
+	Icon,
 	Label,
-	MenuToggle,
+	type LabelProps,
+	List,
+	ListItem,
+	Modal,
+	ModalBody,
+	ModalHeader,
 	PageSection,
 	Popover,
-	ProgressStep,
-	ProgressStepper,
-	Select,
-	SelectList,
-	SelectOption,
 	Spinner,
-	Tab,
-	Tabs,
-	TabTitleText,
 	Title,
+	ToggleGroup,
+	ToggleGroupItem,
+	Toolbar,
+	ToolbarContent,
+	ToolbarGroup,
+	ToolbarItem,
 	Tooltip,
 } from "@patternfly/react-core";
 import {
-	CheckCircleIcon,
-	ColumnsIcon,
-	DownloadIcon,
+	CopyIcon,
 	ExclamationCircleIcon,
-	OutlinedQuestionCircleIcon,
+	ExclamationTriangleIcon,
+	ExternalLinkAltIcon,
 } from "@patternfly/react-icons";
-import {
-	ExpandableRowContent,
-	Table,
-	Tbody,
-	Td,
-	Th,
-	Thead,
-	type ThProps,
-	Tr,
-} from "@patternfly/react-table";
-import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import {
-	downloadSuiteArtifacts,
-	getRelease,
-	getReleaseIssueSummary,
-	getReleaseReadiness,
-	getReleaseSnapshot,
-	listReleaseIssues,
-} from "../api/client";
+import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
+import { type ReactNode, useMemo, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { getCandidate, getRelease, listReleaseIssues } from "../api/client";
 import type {
 	DashboardConfig,
-	IssueSummary,
+	FBCCandidate,
 	JiraIssue,
-	ReadinessResponse,
+	KonfluxRelease,
+	ReleaseCandidate,
 	ReleaseVersion,
-	SnapshotRecord,
-	VulnerabilityReport,
+	Verdict,
+	VerdictItem,
 } from "../api/types";
-import GitShaLink from "../components/GitShaLink";
-import PriorityLabel from "../components/PriorityLabel";
-import StatusLabel from "../components/StatusLabel";
-import TestCasesTable from "../components/TestCasesTable";
-import VulnerabilitiesTable from "../components/VulnerabilitiesTable";
-import { useCachedFetch } from "../hooks/useCachedFetch";
+import LoadError from "../components/LoadError";
 import {
-	type ColumnDef,
-	useColumnManagement,
-} from "../hooks/useColumnManagement";
+	ExtLink,
+	external,
+	Flags,
+	muted,
+	OperatorImages,
+} from "../components/OperatorImages";
+import { Status } from "../components/Status";
+import { SyncProblems, useSyncStatus } from "../components/SyncStatusWarning";
+import { useCachedFetch } from "../hooks/useCachedFetch";
 import { useConfig } from "../hooks/useConfig";
-import { formatReleaseName, jiraIssueUrl, quayImageUrl } from "../utils/links";
+import { days, due } from "../utils/format";
+import {
+	formatReleaseName,
+	jiraIssueUrl,
+	jiraSearchUrl,
+	konfluxUrl,
+	sippyRunsUrl,
+	ticketsJql,
+} from "../utils/links";
+import {
+	bundleBuilt,
+	compareVersions,
+	fbcGroups,
+	fbcParams,
+	fbcPullspecs,
+	fbcsBuilt,
+	freshnessLine,
+	jobLabel,
+	needsAttention,
+	noFbcText,
+	type RunPill,
+	readingLine,
+	releaseLine,
+	type StatusLine,
+	splitTickets,
+	tknCommand,
+	verdictEntries,
+	verdictLine,
+} from "../utils/releaseDetail";
+
+/** A date and time to the minute, local unless timeZone: "Oct 9, 21:48". */
+const when = (iso: string, timeZone?: string) =>
+	new Date(iso).toLocaleString(undefined, {
+		month: "short",
+		day: "numeric",
+		hour: "2-digit",
+		minute: "2-digit",
+		hourCycle: "h23",
+		timeZone,
+	});
 
 export default function ReleaseDetail() {
 	const { version } = useParams<{ version: string }>();
 	const config = useConfig();
 
-	const { data: release, loading: loadingRelease } = useCachedFetch(
-		version ? `release:${version}` : null,
-		() => getRelease(version!),
+	const {
+		data: release,
+		loading: loadingRelease,
+		error: releaseError,
+		refetch: refetchRelease,
+	} = useCachedFetch(`release:${version}`, () => getRelease(version!));
+	const {
+		data: tickets,
+		error: ticketsError,
+		refetch: refetchTickets,
+	} = useCachedFetch(`issues:${version}`, () => listReleaseIssues(version!));
+	const candidate = useCachedFetch(`candidate:${version}`, () =>
+		getCandidate(version!),
 	);
-	const { data: snapshot } = useCachedFetch(
-		version ? `snapshot:${version}` : null,
-		() => getReleaseSnapshot(version!),
-	);
-	const { data: issues } = useCachedFetch(
-		version ? `issues:${version}` : null,
-		() => listReleaseIssues(version!),
-	);
-	const { data: issueSummary } = useCachedFetch(
-		version ? `issueSummary:${version}` : null,
-		() => getReleaseIssueSummary(version!),
-	);
-	const { data: readinessSignal } = useCachedFetch(
-		version ? `readiness:${version}` : null,
-		() => getReleaseReadiness(version!),
-	);
-
-	const [activeSnapshotTab, setActiveSnapshotTab] = useState<string | number>(
-		"components",
-	);
-	const [expandedSuites, setExpandedSuites] = useState<Set<number>>(new Set());
-	const [expandedComponents, setExpandedComponents] = useState<Set<string>>(
-		new Set(),
-	);
-	const [activeArchTab, setActiveArchTab] = useState<Record<string, string>>(
-		{},
-	);
-
-	const groupedVulnReports = useMemo(() => {
-		const reports = snapshot?.vulnerability_reports;
-		if (!reports || reports.length === 0) return [];
-
-		const map = new Map<string, VulnerabilityReport[]>();
-		for (const rpt of reports) {
-			const existing = map.get(rpt.component);
-			if (existing) {
-				existing.push(rpt);
-			} else {
-				map.set(rpt.component, [rpt]);
-			}
-		}
-
-		return [...map.entries()]
-			.map(([component, compReports]) => ({
-				component,
-				reports: compReports.sort((a, b) => a.arch.localeCompare(b.arch)),
-				total: compReports.reduce((s, r) => s + r.total, 0),
-				critical: compReports.reduce((s, r) => s + r.critical, 0),
-				high: compReports.reduce((s, r) => s + r.high, 0),
-				medium: compReports.reduce((s, r) => s + r.medium, 0),
-				low: compReports.reduce((s, r) => s + r.low, 0),
-				fixable: compReports.reduce((s, r) => s + r.fixable, 0),
-			}))
-			.sort((a, b) => a.component.localeCompare(b.component));
-	}, [snapshot?.vulnerability_reports]);
 
 	if (loadingRelease && !release) {
 		return (
 			<PageSection>
-				<div style={{ textAlign: "center" }}>
-					<Spinner />
-				</div>
+				<EmptyState
+					icon={Spinner}
+					titleText={`Loading ${formatReleaseName(version!)}…`}
+				/>
+			</PageSection>
+		);
+	}
+
+	// Only a 404 means the release does not exist; any other failure can be retried.
+	if (!release && releaseError && !releaseError.message.startsWith("404 ")) {
+		return (
+			<PageSection>
+				<LoadError
+					title="Could not load this release"
+					onRetry={() => {
+						refetchRelease();
+						refetchTickets();
+						candidate.refetch();
+					}}
+				>
+					The server did not return data for {formatReleaseName(version!)}. Try
+					again in a moment.
+				</LoadError>
 			</PageSection>
 		);
 	}
@@ -165,871 +171,782 @@ export default function ReleaseDetail() {
 	}
 
 	const displayName = formatReleaseName(release.name);
+	const app = release.konflux_application ?? "";
+	const xyz = release.name.replace(/^[a-z]+-v/, "");
+	const fbc = candidate.data?.fbc_candidate;
+	const pullspecs = fbc && fbcPullspecs(fbc);
 
 	return (
-		<>
-			<PageSection>
-				<Breadcrumb>
-					<BreadcrumbItem>
-						<Link to="/">Releases</Link>
-					</BreadcrumbItem>
-					<BreadcrumbItem isActive>{displayName}</BreadcrumbItem>
-				</Breadcrumb>
-			</PageSection>
+		<PageSection>
+			<Flex
+				alignItems={{ default: "alignItemsCenter" }}
+				style={{ marginBottom: "1rem" }}
+			>
+				<FlexItem>
+					<Breadcrumb>
+						<BreadcrumbItem>
+							<Link to="/">Releases</Link>
+						</BreadcrumbItem>
+						<BreadcrumbHeading>{displayName}</BreadcrumbHeading>
+					</Breadcrumb>
+				</FlexItem>
+			</Flex>
 
-			<PageSection>
-				<Flex
-					justifyContent={{ default: "justifyContentSpaceBetween" }}
-					alignItems={{ default: "alignItemsCenter" }}
-					style={{ marginBottom: "1rem" }}
-				>
-					<FlexItem>
-						<Title headingLevel="h1">{displayName}</Title>
-					</FlexItem>
-					{release.s3_application && (
-						<FlexItem>
-							<Link to={`/releases/${encodeURIComponent(version!)}/snapshots`}>
-								View all snapshots
-							</Link>
-						</FlexItem>
-					)}
-				</Flex>
+			<ReleaseStatusCard
+				release={release}
+				shipped={candidate.data?.shipped ?? release.released}
+				jiraBaseUrl={config?.jira_base_url}
+			/>
 
-				<ReleaseSignal
-					release={release}
-					readiness={readinessSignal ?? null}
-					jiraBaseUrl={config?.jira_base_url}
-					snapshot={snapshot ?? null}
-					issueSummary={issueSummary ?? null}
-				/>
-
-				{snapshot && (
-					<Card isCompact style={{ marginBottom: "1rem" }}>
-						<CardTitle>Latest Snapshot</CardTitle>
-						<CardBody>
-							<Flex
-								justifyContent={{ default: "justifyContentSpaceEvenly" }}
-								flexWrap={{ default: "nowrap" }}
-							>
-								<FlexItem style={{ textAlign: "center" }}>
-									<div className="rr-label">Snapshot</div>
-									<div>{snapshot.name}</div>
-								</FlexItem>
-								<FlexItem style={{ textAlign: "center" }}>
-									<div className="rr-label">Tests</div>
-									<div>
-										{!snapshot.has_tests ? (
-											<Label color="grey">N/A</Label>
-										) : snapshot.tests_passed ? (
-											<Label color="green" icon={<CheckCircleIcon />}>
-												Passed
-											</Label>
-										) : (
-											<Label color="red" icon={<ExclamationCircleIcon />}>
-												Failed
-											</Label>
-										)}
-									</div>
-								</FlexItem>
-								<FlexItem style={{ textAlign: "center" }}>
-									<div className="rr-label">Created</div>
-									<div>{new Date(snapshot.created_at).toLocaleString()}</div>
-								</FlexItem>
-							</Flex>
-
-							<Tabs
-								activeKey={activeSnapshotTab}
-								onSelect={(_e, key) => setActiveSnapshotTab(key)}
-								isFilled
-								style={{ marginTop: "1rem" }}
-							>
-								{snapshot.components && snapshot.components.length > 0 && (
-									<Tab
-										eventKey="components"
-										title={
-											<TabTitleText>
-												Components ({snapshot.components.length})
-											</TabTitleText>
-										}
-									>
-										<Table variant="compact">
-											<Thead>
-												<Tr>
-													<Th>Component</Th>
-													<Th>Git SHA</Th>
-													<Th>Image</Th>
-												</Tr>
-											</Thead>
-											<Tbody>
-												{snapshot.components.map((c) => {
-													const imgUrl = quayImageUrl(c.image_url);
-													const imgDisplay = c.image_url.includes("/")
-														? (c.image_url.split("/").pop()?.split("@")[0] ??
-															c.image_url)
-														: c.image_url;
-													return (
-														<Tr key={c.id}>
-															<Td>{c.component}</Td>
-															<Td>
-																<GitShaLink
-																	component={c.component}
-																	sha={c.git_sha}
-																	gitUrl={c.git_url}
-																/>
-															</Td>
-															<Td>
-																{imgUrl ? (
-																	<a
-																		href={imgUrl}
-																		target="_blank"
-																		rel="noopener noreferrer"
-																	>
-																		<code style={{ fontSize: "0.85em" }}>
-																			{imgDisplay}
-																		</code>
-																	</a>
-																) : (
-																	<code style={{ fontSize: "0.85em" }}>
-																		{c.image_url}
-																	</code>
-																)}
-															</Td>
-														</Tr>
-													);
-												})}
-											</Tbody>
-										</Table>
-									</Tab>
-								)}
-
-								{snapshot.test_suites && snapshot.test_suites.length > 0 && (
-									<Tab
-										eventKey="testSuites"
-										title={
-											<TabTitleText>
-												Test Suites ({snapshot.test_suites.length})
-											</TabTitleText>
-										}
-									>
-										<Table variant="compact">
-											<Thead>
-												<Tr>
-													<Th screenReaderText="Toggle" />
-													<Th>Suite</Th>
-													<Th>Status</Th>
-													<Th>Tool</Th>
-													<Th modifier="fitContent">Passed</Th>
-													<Th modifier="fitContent">Failed</Th>
-													<Th modifier="fitContent">Skipped</Th>
-													<Th modifier="fitContent">Total</Th>
-													<Th screenReaderText="Actions" />
-												</Tr>
-											</Thead>
-											{snapshot.test_suites.map((ts) => {
-												const isSuiteExpanded = expandedSuites.has(ts.id);
-												return (
-													<Tbody key={ts.id} isExpanded={isSuiteExpanded}>
-														<Tr>
-															<Td
-																expand={{
-																	rowIndex: ts.id,
-																	isExpanded: isSuiteExpanded,
-																	onToggle: () =>
-																		setExpandedSuites((prev) => {
-																			const next = new Set(prev);
-																			if (next.has(ts.id)) {
-																				next.delete(ts.id);
-																			} else {
-																				next.add(ts.id);
-																			}
-																			return next;
-																		}),
-																}}
-															/>
-															<Td>{ts.name}</Td>
-															<Td>
-																<StatusLabel status={ts.status} />
-															</Td>
-															<Td>
-																{ts.tool_name}
-																{ts.tool_version ? ` ${ts.tool_version}` : ""}
-															</Td>
-															<Td>{ts.tests === 0 ? "\u2014" : ts.passed}</Td>
-															<Td>{ts.tests === 0 ? "\u2014" : ts.failed}</Td>
-															<Td>{ts.tests === 0 ? "\u2014" : ts.skipped}</Td>
-															<Td>{ts.tests === 0 ? "\u2014" : ts.tests}</Td>
-															<Td modifier="fitContent">
-																<Tooltip content="Download artifacts">
-																	<Button
-																		variant="plain"
-																		aria-label="Download artifacts"
-																		style={{ padding: 0 }}
-																		onClick={() =>
-																			downloadSuiteArtifacts(snapshot.id, ts.id)
-																		}
-																	>
-																		<DownloadIcon />
-																	</Button>
-																</Tooltip>
-															</Td>
-														</Tr>
-														{isSuiteExpanded && (
-															<Tr isExpanded>
-																<Td colSpan={9}>
-																	<ExpandableRowContent>
-																		{ts.test_cases &&
-																		ts.test_cases.length > 0 ? (
-																			<TestCasesTable
-																				testCases={ts.test_cases}
-																			/>
-																		) : (
-																			<em>No test cases recorded.</em>
-																		)}
-																	</ExpandableRowContent>
-																</Td>
-															</Tr>
-														)}
-													</Tbody>
-												);
-											})}
-										</Table>
-									</Tab>
-								)}
-								{groupedVulnReports.length > 0 && (
-									<Tab
-										eventKey="securityScans"
-										title={
-											<TabTitleText>
-												Security Scans ({groupedVulnReports.length})
-											</TabTitleText>
-										}
-									>
-										<Table variant="compact">
-											<Thead>
-												<Tr>
-													<Th screenReaderText="Toggle" />
-													<Th>Component</Th>
-													<Th modifier="fitContent">Architectures</Th>
-													<Th modifier="fitContent">Critical</Th>
-													<Th modifier="fitContent">High</Th>
-													<Th modifier="fitContent">Medium</Th>
-													<Th modifier="fitContent">Low</Th>
-													<Th modifier="fitContent">Total</Th>
-													<Th modifier="fitContent">Fixable</Th>
-												</Tr>
-											</Thead>
-											{groupedVulnReports.map((group, groupIdx) => {
-												const isExpanded = expandedComponents.has(
-													group.component,
-												);
-												const selectedArch =
-													activeArchTab[group.component] ??
-													group.reports[0]?.arch;
-												const selectedReport = group.reports.find(
-													(r) => r.arch === selectedArch,
-												);
-												return (
-													<Tbody key={group.component} isExpanded={isExpanded}>
-														<Tr>
-															<Td
-																expand={{
-																	rowIndex: groupIdx,
-																	isExpanded,
-																	onToggle: () =>
-																		setExpandedComponents((prev) => {
-																			const next = new Set(prev);
-																			if (next.has(group.component)) {
-																				next.delete(group.component);
-																			} else {
-																				next.add(group.component);
-																			}
-																			return next;
-																		}),
-																}}
-															/>
-															<Td>{group.component}</Td>
-															<Td>{group.reports.length}</Td>
-															<Td>
-																<SeverityCount
-																	count={group.critical}
-																	severity="Critical"
-																/>
-															</Td>
-															<Td>
-																<SeverityCount
-																	count={group.high}
-																	severity="High"
-																/>
-															</Td>
-															<Td>
-																<SeverityCount
-																	count={group.medium}
-																	severity="Medium"
-																/>
-															</Td>
-															<Td>
-																<SeverityCount
-																	count={group.low}
-																	severity="Low"
-																/>
-															</Td>
-															<Td>{group.total}</Td>
-															<Td>{group.fixable}</Td>
-														</Tr>
-														{isExpanded && selectedReport && (
-															<Tr isExpanded>
-																<Td colSpan={9}>
-																	<ExpandableRowContent>
-																		<Tabs
-																			isFilled
-																			activeKey={selectedArch}
-																			onSelect={(_e, key) =>
-																				setActiveArchTab((prev) => ({
-																					...prev,
-																					[group.component]: String(key),
-																				}))
-																			}
-																		>
-																			{group.reports.map((rpt) => (
-																				<Tab
-																					key={rpt.arch}
-																					eventKey={rpt.arch}
-																					title={
-																						<TabTitleText>
-																							{rpt.arch} ({rpt.total})
-																						</TabTitleText>
-																					}
-																				>
-																					<div style={{ padding: "1rem 0" }}>
-																						<Flex
-																							spaceItems={{
-																								default: "spaceItemsLg",
-																							}}
-																							style={{ marginBottom: "1rem" }}
-																						>
-																							<FlexItem>
-																								Critical:{" "}
-																								<SeverityCount
-																									count={rpt.critical}
-																									severity="Critical"
-																								/>
-																							</FlexItem>
-																							<FlexItem>
-																								High:{" "}
-																								<SeverityCount
-																									count={rpt.high}
-																									severity="High"
-																								/>
-																							</FlexItem>
-																							<FlexItem>
-																								Medium:{" "}
-																								<SeverityCount
-																									count={rpt.medium}
-																									severity="Medium"
-																								/>
-																							</FlexItem>
-																							<FlexItem>
-																								Low:{" "}
-																								<SeverityCount
-																									count={rpt.low}
-																									severity="Low"
-																								/>
-																							</FlexItem>
-																							<FlexItem>
-																								Total: {rpt.total}
-																							</FlexItem>
-																							<FlexItem>
-																								Fixable: {rpt.fixable}
-																							</FlexItem>
-																						</Flex>
-																						{rpt.vulnerabilities &&
-																						rpt.vulnerabilities.length > 0 ? (
-																							<VulnerabilitiesTable
-																								vulnerabilities={
-																									rpt.vulnerabilities
-																								}
-																							/>
-																						) : (
-																							<em>
-																								No vulnerabilities recorded.
-																							</em>
-																						)}
-																					</div>
-																				</Tab>
-																			))}
-																		</Tabs>
-																	</ExpandableRowContent>
-																</Td>
-															</Tr>
-														)}
-													</Tbody>
-												);
-											})}
-										</Table>
-									</Tab>
-								)}
-							</Tabs>
-						</CardBody>
-					</Card>
+			<BuildsCard
+				data={candidate.data}
+				error={candidate.error}
+				loading={candidate.loading}
+				onRetry={candidate.refetch}
+				version={xyz}
+				konflux={konfluxUrl(
+					config?.konflux_ui_url ?? "",
+					config?.konflux_namespace ?? "",
+					app,
 				)}
+				inputs={
+					pullspecs &&
+					!candidate.data?.shipped && (
+						<ReleaseInputsButton>
+							<ReleaseInputs
+								app={app}
+								version={xyz}
+								pullspecs={pullspecs}
+								bugs={
+									config?.jira_enabled === false
+										? undefined
+										: tickets?.map((t) => t.key)
+								}
+								dueDate={release.due_date}
+							/>
+						</ReleaseInputsButton>
+					)
+				}
+			/>
 
-				{(issues ?? []).length > 0 && (
-					<IssuesCard
-						issues={issues ?? []}
-						version={version!}
-						config={config ?? undefined}
-					/>
-				)}
-			</PageSection>
-		</>
+			{candidate.data?.fbc_candidate && (
+				<OperatorImages d={candidate.data} version={xyz} />
+			)}
+
+			<TicketsCard
+				issues={tickets}
+				error={ticketsError}
+				version={version!}
+				config={config}
+				ticketKey={release.release_ticket_key}
+			/>
+		</PageSection>
 	);
 }
 
-function ReleaseSignal({
+/** The target date, flagged while unshipped once past or within 3 days, the ticket and its assignee. */
+function ReleaseStatusCard({
 	release,
-	readiness,
+	shipped,
 	jiraBaseUrl,
-	snapshot,
-	issueSummary,
 }: {
 	release: ReleaseVersion;
-	readiness: ReadinessResponse | null;
+	shipped: boolean;
 	jiraBaseUrl?: string;
-	snapshot: SnapshotRecord | null;
-	issueSummary: IssueSummary | null;
 }) {
-	const dueDate = release.due_date ? new Date(release.due_date) : null;
-	const releaseDate = release.release_date
-		? new Date(release.release_date)
-		: null;
-	const targetDate = dueDate ?? releaseDate;
-
-	const daysUntil = targetDate
-		? Math.ceil((targetDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-		: null;
-
-	const signalColor =
-		readiness?.signal === "green"
-			? "green"
-			: readiness?.signal === "red"
-				? "red"
-				: readiness?.signal === "yellow"
-					? "yellow"
-					: "grey";
-
-	const ticketLink = release.release_ticket_key
-		? jiraIssueUrl(
-				release.release_ticket_key,
-				jiraBaseUrl || "https://redhat.atlassian.net",
-			)
-		: null;
-
-	const buildsReady =
-		snapshot !== null &&
-		snapshot.components !== undefined &&
-		snapshot.components.length > 0;
-	const hasTests = snapshot?.has_tests ?? false;
-	const allTestsPassed = hasTests && (snapshot?.tests_passed ?? false);
-	const bugsVerified =
-		issueSummary !== null && issueSummary.total > 0 && issueSummary.open === 0;
-	const qeSignOff = allTestsPassed && (bugsVerified || issueSummary === null);
-
-	const progressItems = [
-		{ label: "Builds ready", done: buildsReady, warning: snapshot === null },
-		{
-			label: "Tests passed",
-			done: allTestsPassed,
-			warning: !hasTests,
-			danger: hasTests && !allTestsPassed,
-		},
-		...(issueSummary ? [{ label: "Bugs verified", done: bugsVerified }] : []),
-		{ label: "QE sign off", done: qeSignOff },
-	];
-
-	const firstIncomplete = progressItems.findIndex((i) => !i.done);
-
+	const ticket = release.release_ticket_key;
+	const target = release.due_date ?? release.release_date;
+	const dueDate = target ? due(target, shipped) : undefined;
 	return (
 		<Card isCompact style={{ marginBottom: "1rem" }}>
-			<CardTitle>Release Status</CardTitle>
 			<CardBody>
 				<Flex justifyContent={{ default: "justifyContentSpaceEvenly" }}>
-					{readiness && (
-						<FlexItem style={{ textAlign: "center" }}>
-							<div className="rr-label">Signal</div>
-							<Label color={signalColor} isCompact>
-								{readiness.message}
-							</Label>
-						</FlexItem>
-					)}
 					<FlexItem style={{ textAlign: "center" }}>
 						<div className="rr-label">Target</div>
 						<div>
-							{targetDate ? targetDate.toLocaleDateString() : "TBD"}
-							{daysUntil !== null && ` (${daysUntil} days)`}
+							{dueDate?.date ?? "TBD"}
+							{dueDate?.kind === "past" && (
+								<Label
+									color="red"
+									icon={<ExclamationCircleIcon />}
+									isCompact
+									style={{ marginLeft: "0.5rem" }}
+								>
+									Past due
+								</Label>
+							)}
+							{dueDate?.kind === "soon" && (
+								<Label
+									color="yellow"
+									icon={<ExclamationTriangleIcon />}
+									isCompact
+									style={{ marginLeft: "0.5rem" }}
+								>
+									{dueDate.days === 0
+										? "Due today"
+										: `Due in ${days(dueDate.days)}`}
+								</Label>
+							)}
 						</div>
 					</FlexItem>
-					{release.release_ticket_key && (
+					{ticket && (
 						<FlexItem style={{ textAlign: "center" }}>
 							<div className="rr-label">Ticket</div>
-							<div>
-								{ticketLink ? (
-									<a
-										href={ticketLink}
-										target="_blank"
-										rel="noopener noreferrer"
-									>
-										{release.release_ticket_key}
-									</a>
-								) : (
-									release.release_ticket_key
+							<a
+								href={jiraIssueUrl(
+									ticket,
+									jiraBaseUrl || "https://redhat.atlassian.net",
 								)}
-							</div>
+								{...external}
+							>
+								{ticket}
+							</a>
 						</FlexItem>
 					)}
-					{release.release_ticket_assignee && (
-						<FlexItem style={{ textAlign: "center" }}>
-							<div className="rr-label">Assignee</div>
-							<div>{release.release_ticket_assignee}</div>
-						</FlexItem>
-					)}
-					{release.released && (
-						<FlexItem style={{ textAlign: "center" }}>
-							<div className="rr-label">Status</div>
-							<Label color="green">Released</Label>
-						</FlexItem>
-					)}
+					<FlexItem style={{ textAlign: "center" }}>
+						<div className="rr-label">Assignee</div>
+						<div>{release.release_ticket_assignee || "Unassigned"}</div>
+					</FlexItem>
 				</Flex>
-				<ProgressStepper isCenterAligned style={{ marginTop: "1.5rem" }}>
-					{progressItems.map((item, idx) => (
-						<ProgressStep
-							key={item.label}
-							variant={
-								item.done
-									? "success"
-									: item.danger
-										? "danger"
-										: item.warning
-											? "warning"
-											: "pending"
-							}
-							isCurrent={idx === firstIncomplete}
-							id={`step-${idx}`}
-							titleId={`step-${idx}-title`}
-							aria-label={item.label}
-						>
-							{item.label}
-						</ProgressStep>
-					))}
-				</ProgressStepper>
 			</CardBody>
 		</Card>
 	);
 }
 
-const severityLabelColor: Record<string, "red" | "orange" | "yellow" | "grey"> =
-	{
-		Critical: "red",
-		High: "red",
-		Medium: "orange",
-		Low: "yellow",
-	};
-
-function SeverityCount({
-	count,
-	severity,
+/** A card title with a link out on the right, hidden without an href. */
+function LinkedCardTitle({
+	href,
+	link,
+	children,
 }: {
-	count: number;
-	severity: string;
+	href?: string | null;
+	link?: string;
+	children: ReactNode;
 }) {
-	if (count === 0) return <>{"\u2014"}</>;
 	return (
-		<Label color={severityLabelColor[severity] ?? "grey"} isCompact>
-			{count}
-		</Label>
+		<CardTitle>
+			<Flex
+				justifyContent={{ default: "justifyContentSpaceBetween" }}
+				alignItems={{ default: "alignItemsCenter" }}
+			>
+				<FlexItem>{children}</FlexItem>
+				<Flex spaceItems={{ default: "spaceItemsSm" }}>
+					{href && (
+						<FlexItem>
+							<Button
+								component="a"
+								variant="secondary"
+								size="sm"
+								href={href}
+								{...external}
+								icon={<ExternalLinkAltIcon />}
+								iconPosition="end"
+							>
+								{link}
+							</Button>
+						</FlexItem>
+					)}
+				</Flex>
+			</Flex>
+		</CardTitle>
 	);
 }
 
-const ISSUES_COLUMNS: ColumnDef[] = [
-	{ key: "key", label: "Key" },
-	{ key: "type", label: "Type" },
-	{ key: "summary", label: "Summary" },
-	{ key: "priority", label: "Priority" },
-	{ key: "status", label: "Status" },
-	{ key: "assignee", label: "Assignee" },
-	{ key: "qaContact", label: "QA Contact" },
-];
+/**
+ * The version's release candidate, its operator FBCs, or why it has none; a
+ * shipped version's is labeled, with nothing to release.
+ */
+function BuildsCard({
+	data,
+	error,
+	loading,
+	onRetry,
+	version,
+	konflux,
+	inputs,
+}: {
+	data?: ReleaseCandidate;
+	error?: Error;
+	loading: boolean;
+	onRetry: () => void;
+	/** The version's X.Y.Z. */
+	version: string;
+	/** The version's application in the Konflux UI. */
+	konflux: string | null;
+	/** The release command button, beside the verdict. */
+	inputs?: ReactNode;
+}) {
+	const fbc = data?.fbc_candidate;
+	return (
+		<Card isCompact style={{ marginBottom: "1rem" }}>
+			<LinkedCardTitle href={fbc ? null : konflux} link="Konflux">
+				Release candidate
+			</LinkedCardTitle>
+			<CardBody>
+				{!data && loading ? (
+					<Spinner size="md" />
+				) : error ? (
+					<LoadError
+						variant="xs"
+						title="Could not load the release candidate"
+						onRetry={onRetry}
+					>
+						Its builds, CI, and release status are unavailable right now.
+					</LoadError>
+				) : !data ? (
+					<Spinner size="md" />
+				) : fbc ? (
+					<Candidate
+						data={data}
+						fbc={fbc}
+						version={version}
+						konflux={konflux}
+						inputs={inputs}
+					/>
+				) : data.shipped ? (
+					`v${version} has shipped. No FBC build data is recorded for it.`
+				) : (
+					noFbcText(version, data.reason)
+				)}
+			</CardBody>
+		</Card>
+	);
+}
 
-const priorityWeight: Record<string, number> = {
-	blocker: 0,
-	critical: 1,
-	major: 2,
-	normal: 3,
-	minor: 4,
-	undefined: 5,
+/**
+ * The FBC candidate: its verdict, a failed or running prod Release and the
+ * verdict's items, beside the release command; then its FBCs needing
+ * attention, or all of them, each with its build, stage and CI.
+ */
+function Candidate({
+	data,
+	fbc,
+	version,
+	konflux,
+	inputs,
+}: {
+	data: ReleaseCandidate;
+	fbc: FBCCandidate;
+	version: string;
+	konflux: string | null;
+	inputs?: ReactNode;
+}) {
+	const groups = fbcGroups(data);
+	const allRows = groups.flatMap((g) => g.rows);
+	const [params, setParams] = useSearchParams();
+	const operator = params.get("operator") ?? "";
+	const ocp = params.get("ocp") ?? "";
+	const set = (key: string, value: string) =>
+		setParams(
+			(prev) => {
+				const next = new URLSearchParams(prev);
+				if (value) next.set(key, value);
+				else next.delete(key);
+				return next;
+			},
+			{ replace: true },
+		);
+	const operators = [...new Set(allRows.map((r) => r.operator))].sort();
+	const ocps = [...new Set(allRows.map((r) => r.ocp))].sort(compareVersions);
+	const rows = allRows.filter(
+		(r) => (!operator || r.operator === operator) && (!ocp || r.ocp === ocp),
+	);
+	const attention = rows.filter(needsAttention);
+	const [all, setAll] = useState(false);
+	const shown = all ? rows : attention;
+	const entries = verdictEntries(data.verdict);
+	const read = readingLine(data.reading);
+	const prod = data.candidate?.prod;
+	const prodLine = prod && releaseLine(prod);
+	return (
+		<>
+			<Flex
+				justifyContent={{ default: "justifyContentSpaceBetween" }}
+				alignItems={{ default: "alignItemsFlexStart" }}
+				gap={{ default: "gapSm" }}
+			>
+				<FlexItem>
+					<VerdictHeader
+						verdict={data.verdict}
+						prod={data.candidate?.prod ?? null}
+					/>
+					{read && (
+						<div style={line}>
+							<Status status={read.status}>{read.text}</Status>
+						</div>
+					)}
+					{prodLine && prodLine.status !== "done" && (
+						<div style={line} title={prod.name}>
+							<Status status={prodLine.status}>Prod: {prodLine.text}</Status>
+						</div>
+					)}
+				</FlexItem>
+				{inputs && <FlexItem>{inputs}</FlexItem>}
+			</Flex>
+			{entries.length > 0 && (
+				<List style={line}>
+					{entries.map((e) => (
+						<ListItem key={`${e.level} ${e.text}`}>
+							<Tooltip content={e.tip.map((t) => <div key={t}>{t}</div>)}>
+								<Label isCompact tabIndex={0} status={levelStatus[e.level]}>
+									{e.count > 1 ? `${e.text} (${e.count})` : e.text}
+								</Label>
+							</Tooltip>
+							{e.on && ` ${e.on}`}
+							{e.action && <span style={muted}> · Next: {e.action}</span>}
+						</ListItem>
+					))}
+				</List>
+			)}
+			<Toolbar style={{ marginTop: "1rem", paddingBlock: 0 }}>
+				<ToolbarContent>
+					<ToolbarItem>
+						<FormSelect
+							value={operator}
+							onChange={(_e, v) => set("operator", v)}
+							aria-label="Operator"
+						>
+							<FormSelectOption value="" label="All operators" />
+							{operators.map((o) => (
+								<FormSelectOption key={o} value={o} label={o} />
+							))}
+						</FormSelect>
+					</ToolbarItem>
+					<ToolbarItem>
+						<FormSelect
+							value={ocp}
+							onChange={(_e, v) => set("ocp", v)}
+							aria-label="OCP version"
+							style={{ width: "12rem" }}
+						>
+							<FormSelectOption value="" label="All OCP versions" />
+							{ocps.map((o) => (
+								<FormSelectOption key={o} value={o} label={`OCP ${o}`} />
+							))}
+						</FormSelect>
+					</ToolbarItem>
+					<ToolbarItem>
+						<ToggleGroup isCompact aria-label="FBCs shown">
+							<ToggleGroupItem
+								text={`Needs attention (${attention.length})`}
+								isSelected={!all}
+								onChange={() => setAll(false)}
+							/>
+							<ToggleGroupItem
+								text={`All (${rows.length})`}
+								isSelected={all}
+								onChange={() => setAll(true)}
+							/>
+						</ToggleGroup>
+					</ToolbarItem>
+					<ToolbarGroup align={{ default: "alignEnd" }}>
+						<ToolbarItem>
+							<Button
+								component={(p) => (
+									<Link
+										{...p}
+										to={{ pathname: "ci", search: params.toString() }}
+									/>
+								)}
+								variant="link"
+								size="sm"
+							>
+								CI history
+							</Button>
+						</ToolbarItem>
+						<ToolbarItem>
+							<OutLink href={sippyRunsUrl(version, fbcsBuilt(fbc))}>
+								Sippy
+							</OutLink>
+						</ToolbarItem>
+						<ToolbarItem>
+							<OutLink href={konflux}>Konflux</OutLink>
+						</ToolbarItem>
+					</ToolbarGroup>
+				</ToolbarContent>
+			</Toolbar>
+			{shown.length === 0 ? (
+				<EmptyState
+					variant="xs"
+					headingLevel="h4"
+					titleText={
+						rows.length === 0 && (operator || ocp)
+							? "No FBC matches the filters"
+							: all
+								? "No FBCs"
+								: "No FBC needs attention"
+					}
+				/>
+			) : (
+				<Table variant="compact" aria-label="Candidate FBCs">
+					<Thead>
+						<Tr>
+							<Th>Operator</Th>
+							<Th>OCP</Th>
+							<Th>Built (UTC)</Th>
+							<Th>Stage</Th>
+							<Th>CI</Th>
+							<Th screenReaderText="FBC" />
+						</Tr>
+					</Thead>
+					<Tbody>
+						{shown.map((r) => (
+							<Tr key={`${r.operator} ${r.ocp} ${r.fbc?.digest ?? ""}`}>
+								<Td dataLabel="Operator">{r.operator}</Td>
+								<Td dataLabel="OCP" modifier="nowrap">
+									{r.ocp}
+								</Td>
+								<Td dataLabel="Built (UTC)" modifier="nowrap">
+									{r.fbc ? (
+										<ExtLink href={r.fbc.build_url || null} title={r.fbc.nvr}>
+											{bundleBuilt(r.fbc.nvr) || r.fbc.nvr || "unresolved"}
+										</ExtLink>
+									) : (
+										<span style={muted}>–</span>
+									)}
+								</Td>
+								<Td dataLabel="Stage">
+									<Flex
+										gap={{ default: "gapMd" }}
+										alignItems={{ default: "alignItemsCenter" }}
+									>
+										{r.stage ? (
+											<Status status={r.stage.status}>{r.stage.text}</Status>
+										) : (
+											<span style={muted}>{r.fbc ? "Not staged" : "–"}</span>
+										)}
+										<Flags flags={r.flags} />
+									</Flex>
+								</Td>
+								<Td dataLabel="CI" modifier="nowrap">
+									{r.runs.length === 0 ? (
+										<span style={muted}>No runs</span>
+									) : (
+										<RunSummary runs={r.runs} />
+									)}
+								</Td>
+								<Td dataLabel="FBC" modifier="fitContent">
+									{r.fbc && (
+										<Button
+											variant="plain"
+											size="sm"
+											icon={<CopyIcon />}
+											aria-label={`Copy the ${r.operator} OCP ${r.ocp} FBC pullspec`}
+											title={r.fbc.pullspec}
+											onClick={() =>
+												navigator.clipboard.writeText(r.fbc?.pullspec ?? "")
+											}
+										/>
+									)}
+								</Td>
+							</Tr>
+						))}
+					</Tbody>
+				</Table>
+			)}
+		</>
+	);
+}
+
+/** A small link button opening href in a new tab, hidden without an href. */
+function OutLink({
+	href,
+	children,
+}: {
+	href: string | null;
+	children: ReactNode;
+}) {
+	return (
+		href && (
+			<Button
+				component="a"
+				variant="link"
+				size="sm"
+				href={href}
+				{...external}
+				icon={<ExternalLinkAltIcon />}
+				iconPosition="end"
+			>
+				{children}
+			</Button>
+		)
+	);
+}
+
+const levelStatus: Record<VerdictItem["level"], LabelProps["status"]> = {
+	blocker: "danger",
+	warning: "warning",
+	info: "info",
 };
 
-function buildJQL(
-	config: DashboardConfig | undefined,
-	version: string,
-): string | undefined {
-	if (!config?.jira_project) return undefined;
-	const project = config.jira_project;
-	return `project=${project} AND "Target Version"="${version}"`;
+const runStatus: Record<string, StatusLine["status"]> = {
+	success: "done",
+	failure: "failed",
+	error: "failed",
+	pending: "running",
+};
+const runStatusOf = (p: RunPill) => runStatus[p.state] ?? "warning";
+
+/** Run results as counted, worst first. */
+const runWords: [StatusLine["status"], string][] = [
+	["failed", "failed"],
+	["running", "running"],
+	["warning", "other"],
+	["done", "passed"],
+];
+const runWordOf = (p: RunPill) =>
+	runWords.find(([s]) => s === runStatusOf(p))?.[1];
+
+/**
+ * An FBC row's CI: its jobs counted by result, worst first, opening a list of
+ * the jobs, each linking to its newest run in Prow. A run on another FBC of
+ * the same bundle is marked "≈".
+ */
+function RunSummary({ runs }: { runs: RunPill[] }) {
+	const counts = runWords
+		.map(([s, word]) => ({
+			s,
+			word,
+			n: runs.filter((p) => runStatusOf(p) === s).length,
+		}))
+		.filter((c) => c.n > 0);
+	return (
+		<Popover
+			headerContent={`${runs.length} CI jobs`}
+			bodyContent={
+				<List isPlain>
+					{runs.map((p) => (
+						<ListItem key={`${p.job} ${p.equivalent}`}>
+							<a
+								href={p.prow_url}
+								aria-label={`${jobLabel(p.job)} ${runWordOf(p)}`}
+								title={[
+									`${p.job}: ${runWordOf(p)}`,
+									`Started ${when(p.started_at)}`,
+									p.install_failed && "Install failed",
+									p.runs > 1 && `Newest of ${p.runs} runs`,
+									p.equivalent &&
+										"Ran on another FBC with the same bundle; its channel graph can differ.",
+								]
+									.filter(Boolean)
+									.join("\n")}
+								{...external}
+							>
+								<Status status={runStatusOf(p)}>
+									{p.equivalent && "≈ "}
+									{jobLabel(p.job)}
+								</Status>
+							</a>
+						</ListItem>
+					))}
+				</List>
+			}
+		>
+			<Button variant="link" isInline>
+				<Status status={counts[0].s}>
+					{counts.map((c) => `${c.n} ${c.word}`).join(" · ")}
+				</Status>
+			</Button>
+		</Popover>
+	);
 }
 
-function IssuesCard({
+const warningIcon = (
+	<Icon status="warning" isInline>
+		<ExclamationTriangleIcon />
+	</Icon>
+);
+
+/** Whether the version can ship; a shipped version's is its prod Release. */
+function VerdictHeader({
+	verdict,
+	prod,
+}: {
+	verdict: Verdict;
+	prod: KonfluxRelease | null;
+}) {
+	const head = verdictLine(verdict);
+	const text =
+		verdict.state === "shipped" && prod?.completion_time
+			? `Shipped ${when(prod.completion_time, "UTC")} UTC`
+			: head.text;
+	return (
+		<Status status={head.status}>
+			<strong>{text}</strong> <DataFreshness />
+		</Status>
+	);
+}
+
+/** How fresh the verdict's data is; a stale line opens its sync problems. */
+function DataFreshness() {
+	const status = useSyncStatus();
+	const line = status && freshnessLine(status);
+	if (!line) return null;
+	if (line.problems.length === 0)
+		return <span style={muted}>· {line.text}</span>;
+	return (
+		<Popover
+			headerContent="Sync problems"
+			bodyContent={<SyncProblems problems={line.problems} />}
+		>
+			<Button variant="link" isInline icon={warningIcon}>
+				{line.text}
+			</Button>
+		</Popover>
+	);
+}
+
+/** A button opening children, the release's inputs, in a modal. */
+function ReleaseInputsButton({ children }: { children: ReactNode }) {
+	const [open, setOpen] = useState(false);
+	return (
+		<>
+			<Button variant="secondary" size="sm" onClick={() => setOpen(true)}>
+				Review release command
+			</Button>
+			<Modal
+				isOpen={open}
+				onClose={() => setOpen(false)}
+				aria-labelledby="release-inputs-title"
+				variant="large"
+			>
+				<ModalHeader
+					title="Review release command"
+					labelId="release-inputs-title"
+				/>
+				<ModalBody tabIndex={0}>{children}</ModalBody>
+			</Modal>
+		</>
+	);
+}
+
+/**
+ * release-from-fbc's dry-run tkn command for its one release-wide run, to
+ * review and run by hand: RR starts no run.
+ */
+function ReleaseInputs({
+	app,
+	version,
+	pullspecs,
+	bugs,
+	dueDate,
+}: {
+	app: string;
+	/** The version's X.Y.Z. */
+	version: string;
+	/** The candidate's fbc-pullspecs. */
+	pullspecs: string;
+	/** The version's ticket keys; undefined while unknown. */
+	bugs?: string[];
+	dueDate?: string;
+}) {
+	return (
+		<ClipboardCopy isReadOnly isCode isExpanded variant="expansion">
+			{tknCommand(fbcParams(app, version, pullspecs, bugs ?? [], dueDate))}
+		</ClipboardCopy>
+	);
+}
+
+const line = { marginTop: "0.5rem" };
+
+/**
+ * The version's fixVersion issues but its release ticket, shown atop the
+ * page.
+ */
+function TicketsCard({
 	issues,
+	error,
 	version,
 	config,
+	ticketKey,
 }: {
-	issues: JiraIssue[];
+	issues?: JiraIssue[];
+	error?: Error;
 	version: string;
 	config?: DashboardConfig;
+	ticketKey?: string;
 }) {
-	const [typeFilter, setTypeFilter] = useState<string>("All");
-	const [typeSelectOpen, setTypeSelectOpen] = useState(false);
-	const columnMgmt = useColumnManagement("rr-columns-issues", ISSUES_COLUMNS);
-
-	const issueTypes = useMemo(() => {
-		const types = new Set(issues.map((i) => i.issue_type));
-		return ["All", ...Array.from(types).sort()];
-	}, [issues]);
-
-	const filteredIssues = useMemo(
-		() =>
-			typeFilter === "All"
-				? issues
-				: issues.filter((i) => i.issue_type === typeFilter),
-		[issues, typeFilter],
-	);
-
-	const jql = buildJQL(config, version);
+	const { work } = splitTickets(issues ?? [], ticketKey);
+	const hasIssues = work.length > 0;
+	const jira = config?.jira_project
+		? jiraSearchUrl(
+				ticketsJql(config.jira_project, version),
+				config.jira_base_url,
+			)
+		: null;
 
 	return (
 		<Card isCompact style={{ marginBottom: "1rem" }}>
-			<CardTitle>
-				<Flex
-					justifyContent={{ default: "justifyContentSpaceBetween" }}
-					alignItems={{ default: "alignItemsCenter" }}
-				>
-					<FlexItem>
-						{`Linked Issues (${filteredIssues.length})`}
-						{jql && (
-							<Popover headerContent="JQL Query" bodyContent={jql}>
-								<Button
-									variant="plain"
-									aria-label="Show JQL query"
-									style={{ padding: "0 0 0 0.25rem" }}
-								>
-									<OutlinedQuestionCircleIcon />
-								</Button>
-							</Popover>
-						)}
-					</FlexItem>
-					<FlexItem>
-						<Flex
-							alignItems={{ default: "alignItemsCenter" }}
-							spaceItems={{ default: "spaceItemsMd" }}
-						>
-							<FlexItem>
-								<Button
-									variant="plain"
-									aria-label="Manage columns"
-									onClick={columnMgmt.openModal}
-								>
-									<ColumnsIcon />
-								</Button>
-							</FlexItem>
-							<FlexItem>
-								<Select
-									isOpen={typeSelectOpen}
-									selected={typeFilter}
-									onSelect={(_e, value) => {
-										setTypeFilter(value as string);
-										setTypeSelectOpen(false);
-									}}
-									onOpenChange={setTypeSelectOpen}
-									toggle={(toggleRef) => (
-										<MenuToggle
-											ref={toggleRef}
-											onClick={() => setTypeSelectOpen((prev) => !prev)}
-											isExpanded={typeSelectOpen}
-										>
-											Type: {typeFilter}
-										</MenuToggle>
-									)}
-								>
-									<SelectList>
-										{issueTypes.map((t) => (
-											<SelectOption key={t} value={t}>
-												{t}
-											</SelectOption>
-										))}
-									</SelectList>
-								</Select>
-							</FlexItem>
-						</Flex>
-					</FlexItem>
-				</Flex>
-			</CardTitle>
+			<LinkedCardTitle href={jira} link="Jira">
+				Tickets
+				{hasIssues && ` (${work.length})`}
+			</LinkedCardTitle>
 			<CardBody>
-				<IssuesTable issues={filteredIssues} columnMgmt={columnMgmt} />
+				{hasIssues ? (
+					<IssuesTable issues={work} />
+				) : error ? (
+					error.message
+				) : !issues ? (
+					<Spinner size="md" />
+				) : config?.jira_enabled === false ? (
+					"Jira sync off."
+				) : (
+					<EmptyState
+						variant="xs"
+						headingLevel="h4"
+						titleText="No linked fixVersion issues"
+					/>
+				)}
 			</CardBody>
 		</Card>
 	);
 }
 
-function IssuesTable({
-	issues,
-	columnMgmt,
-}: {
-	issues: JiraIssue[];
-	columnMgmt: ReturnType<typeof useColumnManagement>;
-}) {
-	const { isColumnVisible, visibleColumns } = columnMgmt;
-
-	const [activeSortKey, setActiveSortKey] = useState<string | undefined>(
-		undefined,
-	);
-	const [activeSortDirection, setActiveSortDirection] = useState<
-		"asc" | "desc" | undefined
-	>(undefined);
+function IssuesTable({ issues }: { issues: JiraIssue[] }) {
+	// Type, the second column, is the only sortable one.
+	const [direction, setDirection] = useState<"asc" | "desc">();
 
 	const sortedIssues = useMemo(() => {
-		if (activeSortKey === undefined || activeSortDirection === undefined) {
-			return issues;
-		}
+		if (!direction) return issues;
 		return [...issues].sort((a, b) => {
-			let cmp = 0;
-			switch (activeSortKey) {
-				case "type":
-					cmp = a.issue_type.localeCompare(b.issue_type);
-					break;
-				case "priority":
-					cmp =
-						(priorityWeight[a.priority.toLowerCase()] ?? 5) -
-						(priorityWeight[b.priority.toLowerCase()] ?? 5);
-					break;
-				case "status":
-					cmp = a.status.localeCompare(b.status);
-					break;
-				case "assignee":
-					cmp = a.assignee.localeCompare(b.assignee);
-					break;
-				case "qaContact":
-					cmp = a.qa_contact.localeCompare(b.qa_contact);
-					break;
-			}
-			return activeSortDirection === "asc" ? cmp : -cmp;
+			const cmp = a.issue_type.localeCompare(b.issue_type);
+			return direction === "asc" ? cmp : -cmp;
 		});
-	}, [issues, activeSortKey, activeSortDirection]);
-
-	const visibleColumnKeys = visibleColumns.map((c) => c.key);
-
-	const getSortParams = (columnKey: string): ThProps["sort"] => ({
-		sortBy: {
-			index: activeSortKey
-				? visibleColumnKeys.indexOf(activeSortKey)
-				: undefined,
-			direction: activeSortDirection,
-		},
-		onSort: (_event, _index, direction) => {
-			setActiveSortKey(columnKey);
-			setActiveSortDirection(direction);
-		},
-		columnIndex: visibleColumnKeys.indexOf(columnKey),
-	});
+	}, [issues, direction]);
 
 	return (
-		<>
-			<Table variant="compact" style={{ tableLayout: "auto" }}>
-				<Thead>
-					<Tr>
-						{isColumnVisible("key") && (
-							<Th style={{ whiteSpace: "nowrap" }}>Key</Th>
-						)}
-						{isColumnVisible("type") && (
-							<Th sort={getSortParams("type")} style={{ whiteSpace: "nowrap" }}>
-								Type
-							</Th>
-						)}
-						{isColumnVisible("summary") && <Th>Summary</Th>}
-						{isColumnVisible("priority") && (
-							<Th
-								sort={getSortParams("priority")}
-								style={{ whiteSpace: "nowrap", minWidth: "120px" }}
-							>
-								Priority
-							</Th>
-						)}
-						{isColumnVisible("status") && (
-							<Th
-								sort={getSortParams("status")}
-								style={{ whiteSpace: "nowrap", minWidth: "110px" }}
-							>
-								Status
-							</Th>
-						)}
-						{isColumnVisible("assignee") && (
-							<Th
-								sort={getSortParams("assignee")}
-								style={{ whiteSpace: "nowrap" }}
-							>
-								Assignee
-							</Th>
-						)}
-						{isColumnVisible("qaContact") && (
-							<Th
-								sort={getSortParams("qaContact")}
-								style={{ whiteSpace: "nowrap" }}
-							>
-								QA Contact
-							</Th>
-						)}
+		<Table variant="compact" style={{ tableLayout: "auto" }}>
+			<Thead>
+				<Tr>
+					<Th style={{ whiteSpace: "nowrap" }}>Key</Th>
+					<Th
+						sort={{
+							sortBy: { index: direction && 1, direction },
+							onSort: (_event, _index, d) => setDirection(d),
+							columnIndex: 1,
+						}}
+						modifier="fitContent"
+					>
+						Type
+					</Th>
+					<Th>Summary</Th>
+				</Tr>
+			</Thead>
+			<Tbody>
+				{sortedIssues.map((issue) => (
+					<Tr key={issue.key}>
+						<Td style={{ whiteSpace: "nowrap" }}>
+							<a href={issue.link} {...external}>
+								{issue.key}
+							</a>
+						</Td>
+						<Td style={{ whiteSpace: "nowrap" }}>{issue.issue_type}</Td>
+						<Td style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
+							{issue.summary}
+						</Td>
 					</Tr>
-				</Thead>
-				<Tbody>
-					{sortedIssues.map((issue) => (
-						<Tr key={issue.key}>
-							{isColumnVisible("key") && (
-								<Td>
-									<a
-										href={issue.link}
-										target="_blank"
-										rel="noopener noreferrer"
-									>
-										{issue.key}
-									</a>
-								</Td>
-							)}
-							{isColumnVisible("type") && <Td>{issue.issue_type}</Td>}
-							{isColumnVisible("summary") && (
-								<Td style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
-									{issue.summary}
-								</Td>
-							)}
-							{isColumnVisible("priority") && (
-								<Td>
-									<PriorityLabel priority={issue.priority} />
-								</Td>
-							)}
-							{isColumnVisible("status") && (
-								<Td>
-									<StatusLabel status={issue.status} />
-								</Td>
-							)}
-							{isColumnVisible("assignee") && <Td>{issue.assignee}</Td>}
-							{isColumnVisible("qaContact") && <Td>{issue.qa_contact}</Td>}
-						</Tr>
-					))}
-				</Tbody>
-			</Table>
-			<ColumnManagementModal
-				appliedColumns={columnMgmt.appliedColumns}
-				applyColumns={columnMgmt.applyColumns}
-				isOpen={columnMgmt.isModalOpen}
-				onClose={columnMgmt.closeModal}
-			/>
-		</>
+				))}
+			</Tbody>
+		</Table>
 	);
 }
