@@ -1,35 +1,48 @@
-import { Label, LabelGroup } from "@patternfly/react-core";
+import {
+	HelperText,
+	HelperTextItem,
+	Label,
+	type LabelProps,
+} from "@patternfly/react-core";
 import type { ShipmentMR } from "../api/types";
-import { shipmentChip, shipmentFlags } from "../utils/shipment";
+import { shipmentFlags, shipmentLabel } from "../utils/shipment";
 import { external } from "./OperatorImages";
 
-/** A version's ART shipment MR: its stage chip, linking the MR, and flags. */
-export function ShipmentLabels({ mr }: { mr: ShipmentMR }) {
-	const chip = shipmentChip(mr);
+/** A Label render prop that makes the label a link to the shipment MR. */
+export function mrLink(mr: ShipmentMR, title?: string): LabelProps["render"] {
+	return ({ className, content, componentRef }) => (
+		<a
+			className={className}
+			href={mr.web_url}
+			ref={componentRef}
+			title={title}
+			{...external}
+		>
+			{content}
+		</a>
+	);
+}
+
+/** A version's ART shipment MR label, linking it, and its flags as text. */
+export function ShipmentLabels({
+	mr,
+	shipped,
+}: {
+	mr: ShipmentMR;
+	shipped: boolean;
+}) {
+	const label = shipmentLabel(mr, shipped);
+	const flags = shipped ? [] : shipmentFlags(mr);
 	return (
-		<LabelGroup>
-			<Label
-				isCompact
-				status={chip.status}
-				render={({ className, content, componentRef }) => (
-					<a
-						className={className}
-						href={mr.web_url}
-						ref={componentRef}
-						title={chip.tooltip}
-						{...external}
-					>
-						{content}
-					</a>
-				)}
-			>
-				{chip.text}
+		<>
+			<Label isCompact status={label.status} render={mrLink(mr, label.tooltip)}>
+				{label.text}
 			</Label>
-			{shipmentFlags(mr).map((f) => (
-				<Label key={f.text} isCompact status={f.status}>
-					{f.text}
-				</Label>
-			))}
-		</LabelGroup>
+			{flags.length > 0 && (
+				<HelperText>
+					<HelperTextItem>{flags.join(" · ")}</HelperTextItem>
+				</HelperText>
+			)}
+		</>
 	);
 }
