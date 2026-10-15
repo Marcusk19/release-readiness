@@ -79,6 +79,43 @@ export interface FBCCandidate {
 }
 
 /**
+ * The tag ART published an operator's FBC for an OCP version under, the
+ * multi-arch one whose digest is staged_digest, the FBC RR staged for the
+ * slot (basis "staged"). A slot RR staged none of has the newest multi-arch
+ * tag instead (basis "newest", staged_digest ""). newer_tag names the newest
+ * tag when ART built again after the staged one, "" for none.
+ */
+export interface FBCTag {
+	operator: string;
+	ocp: string;
+	tag: string;
+	/** repository:tag, which release-from-fbc takes as an fbc-pullspec. */
+	pullspec: string;
+	digest: string;
+	staged_digest: string;
+	staged_nvr: string;
+	basis: "staged" | "newest";
+	newer_tag: string;
+}
+
+/**
+ * A version's operator FBC tags in ART's public repository, one per slot of
+ * its candidate (source "candidate"), else of the OCP versions its stream
+ * targets ("ocp-build-data"). pullspecs is empty while errors, the slots with
+ * no tag, is not; warnings are the slots whose tag is the newest build, not a
+ * staged one; info the slots ART built again since RR staged them.
+ */
+export interface FBCTags {
+	repository: string;
+	source: "candidate" | "ocp-build-data";
+	pullspecs: string[];
+	tags: FBCTag[];
+	errors: string[];
+	warnings: string[];
+	info: string[];
+}
+
+/**
  * One operator's FBCs, keyed by the bundle heading its newest FBC's release
  * channel ("" for none): members are on that bundle, conflicts are not.
  */
@@ -216,6 +253,8 @@ export interface JiraIssue {
 	key: string;
 	summary: string;
 	issue_type: string;
+	/** The Jira status as of the last JIRA sync: "Release Pending". */
+	status: string;
 	link: string;
 }
 

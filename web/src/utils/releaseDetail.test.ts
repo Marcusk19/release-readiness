@@ -4,6 +4,8 @@ import type {
 	CIJob,
 	FBCCandidate,
 	FBCMember,
+	FBCTag,
+	FBCTags,
 	ImageScan,
 	KonfluxRelease,
 	OperatorFBC,
@@ -17,11 +19,17 @@ import {
 	bundleBuilt,
 	compareVersions,
 	fbcGroups,
+	fbcNewerTitle,
 	fbcParams,
 	fbcPullspecs,
 	fbcsBuilt,
+	fbcTagList,
+	fbcTagsLead,
+	fbcTagsNote,
+	fbcUnstagedTitle,
 	fixableLabels,
 	freshnessLine,
+	issueLists,
 	jobLabel,
 	jobLabels,
 	jobShortName,
@@ -195,6 +203,78 @@ test("fbcParams and tknCommand: 3.17.6 with and without optional params", () => 
 	assert.equal(
 		tknCommand(fbcParams("quay-3-17", "3.17.6", fbc, [])),
 		`tkn pipeline start release-from-fbc -n art-quay-tenant --use-param-defaults -p 'group=quay-3.17' -p 'assembly=3.17.6' -p 'fbc-pullspecs=${fbc}' -p 'dry-run=true'`,
+	);
+});
+
+const issue = (key: string, status: string) => ({ key, status });
+
+test("issueLists: only Release Pending, by key number, each once", () => {
+	const lists = issueLists([
+		issue("PROJQUAY-12348", "Release Pending"),
+		issue("PROJQUAY-9", "Release Pending"),
+		issue("PROJQUAY-100", "Release Pending"),
+		issue("PROJQUAY-9", "Release Pending"),
+	]);
+	assert.deepEqual(lists?.keys, [
+		"PROJQUAY-9",
+		"PROJQUAY-100",
+		"PROJQUAY-12348",
+	]);
+	// The exact format for the pipeline's text field: commas, nothing else.
+	assert.equal(lists?.keys.join(","), "PROJQUAY-9,PROJQUAY-100,PROJQUAY-12348");
+	assert.deepEqual(lists?.leftOut, []);
+});
+
+test("issueLists: the release ticket is no advisory issue, even Release Pending", () => {
+	const lists = issueLists(
+		[
+			issue("PROJQUAY-1", "Release Pending"),
+			issue("PROJQUAY-2", "Release Pending"),
+			issue("PROJQUAY-3", "In Progress"),
+		],
+		"PROJQUAY-2",
+	);
+	assert.deepEqual(lists?.keys, ["PROJQUAY-1"]);
+	// Nor does it show as left out: the Tickets card hides it too.
+	assert.deepEqual(lists?.leftOut, [
+		{ status: "In Progress", keys: ["PROJQUAY-3"] },
+	]);
+});
+
+test("issueLists: left-out issues by status, the largest group first", () => {
+	const lists = issueLists([
+		issue("PROJQUAY-5", "Closed"),
+		issue("PROJQUAY-30", "Verified"),
+		issue("PROJQUAY-4", "Closed"),
+		issue("PROJQUAY-7", "ON_QA"),
+		issue("PROJQUAY-8", ""),
+		issue("PROJQUAY-6", "Closed"),
+		issue("PROJQUAY-20", "Verified"),
+		issue("PROJQUAY-20", "Verified"),
+	]);
+	assert.deepEqual(lists?.keys, []);
+	assert.deepEqual(lists?.leftOut, [
+		{ status: "Closed", keys: ["PROJQUAY-4", "PROJQUAY-5", "PROJQUAY-6"] },
+		{ status: "Verified", keys: ["PROJQUAY-20", "PROJQUAY-30"] },
+		{ status: "No status", keys: ["PROJQUAY-8"] },
+		{ status: "ON_QA", keys: ["PROJQUAY-7"] },
+	]);
+});
+
+test("issueLists: undefined while the issues load, empty lists with none", () => {
+	assert.equal(issueLists(undefined, "PROJQUAY-2"), undefined);
+	assert.deepEqual(issueLists([]), { keys: [], leftOut: [] });
+});
+
+test("tknCommand: carries the Release Pending issues only", () => {
+	const lists = issueLists([
+		issue("PROJQUAY-10", "Release Pending"),
+		issue("PROJQUAY-9", "Release Pending"),
+		issue("PROJQUAY-11", "Verified"),
+	]);
+	assert.match(
+		tknCommand(fbcParams("quay-3-18", "3.18.1", "a,b", lists?.keys ?? [])),
+		/-p 'jira-bugs=PROJQUAY-9,PROJQUAY-10' -p 'dry-run=true'$/,
 	);
 });
 
@@ -963,4 +1043,154 @@ test("noFbcText", () => {
 	);
 	assert.equal(noFbcText("3.0.0", ""), base);
 	assert.equal(noFbcText("3.0.0", undefined), base);
+});
+
+const REPO = "quay.io/redhat-user-workloads/ocp-art-tenant/art-fbc";
+
+const fbcTag = (
+	operator: string,
+	ocp: string,
+	basis: FBCTag["basis"] = "staged",
+	newer_tag = "",
+): FBCTag => {
+	const tag = `${operator}-fbc-3.18.2-20261015132328.ocp${ocp}`;
+	return {
+		operator,
+		ocp,
+		tag,
+		pullspec: `${REPO}:${tag}`,
+		digest: "sha256:a",
+		staged_digest: basis === "staged" ? "sha256:a" : "",
+		staged_nvr: "",
+		basis,
+		newer_tag,
+	};
+};
+
+const fbcTags = (tags: FBCTag[], over: Partial<FBCTags> = {}): FBCTags => ({
+	repository: REPO,
+	source: "candidate",
+	pullspecs: tags.map((t) => t.pullspec),
+	tags,
+	errors: [],
+	warnings: [],
+	info: [],
+	...over,
+});
+
+test("fbcTagList: the tag pullspecs, comma-separated and counted by basis", () => {
+	const list = fbcTagList(
+		fbcTags([
+			fbcTag("quay-operator", "4.14"),
+			fbcTag("quay-operator", "4.16", "newest"),
+		]),
+	);
+	assert.deepEqual(list, {
+		value: `${REPO}:quay-operator-fbc-3.18.2-20261015132328.ocp4.14,${REPO}:quay-operator-fbc-3.18.2-20261015132328.ocp4.16`,
+		count: 2,
+		staged: 1,
+		newest: 1,
+		errors: [],
+		warnings: [],
+		info: [],
+	});
+});
+
+test("fbcTagList: a staged digest with no ART tag is an error and offers no list", () => {
+	const errors = [
+		`quay-operator OCP 4.16: no tag in ${REPO} points at the staged digest sha256:b (searched 12 tags)`,
+	];
+	const list = fbcTagList(
+		fbcTags([fbcTag("quay-operator", "4.14")], { errors, pullspecs: [] }),
+	);
+	assert.equal(list.value, null);
+	assert.deepEqual(list.errors, errors);
+	// Even if the server sent pullspecs with errors, they are not offered.
+	assert.equal(
+		fbcTagList(fbcTags([fbcTag("quay-operator", "4.14")], { errors })).value,
+		null,
+	);
+});
+
+test("fbcTagList: a newest-build stand-in is a warning and a newer build is information; the list is still offered", () => {
+	const warnings = [
+		"quay-operator OCP 4.14: newest ART build, not staged in RR (t)",
+	];
+	const info = ["quay-operator OCP 4.16: ART has a newer build: u"];
+	const list = fbcTagList(
+		fbcTags(
+			[
+				fbcTag("quay-operator", "4.14", "newest"),
+				fbcTag("quay-operator", "4.16", "staged", "u"),
+			],
+			{ warnings, info },
+		),
+	);
+	assert.deepEqual(list.warnings, warnings);
+	assert.deepEqual(list.info, info);
+	assert.equal(list.count, 2);
+	assert.ok(list.value?.includes(":quay-operator-fbc-3.18.2-"));
+});
+
+test("fbcTagList: no tags at all, and a digest pullspec, are errors", () => {
+	const none = fbcTagList(fbcTags([]));
+	assert.equal(none.value, null);
+	assert.equal(none.errors.length, 1);
+	const digest = fbcTagList(
+		fbcTags([fbcTag("quay-operator", "4.14")], {
+			pullspecs: [`${REPO}@sha256:${"a".repeat(64)}`],
+		}),
+	);
+	assert.equal(digest.value, null);
+	assert.match(digest.errors[0], /not a tag/);
+});
+
+test("fbcTagsLead and fbcTagsNote say what the list is", () => {
+	const all = fbcTagList(
+		fbcTags([fbcTag("quay-operator", "4.14"), fbcTag("quay-operator", "4.16")]),
+	);
+	assert.match(
+		fbcTagsLead(all),
+		/tag of each FBC RR staged, found by its digest/,
+	);
+	assert.equal(fbcTagsNote(all), "");
+
+	const some = fbcTagList(
+		fbcTags([
+			fbcTag("quay-operator", "4.14"),
+			fbcTag("quay-operator", "4.16", "newest"),
+			fbcTag("quay-bridge-operator", "4.16", "newest"),
+		]),
+	);
+	assert.match(fbcTagsLead(some), /tag of each FBC RR staged/);
+	assert.equal(
+		fbcTagsNote(some),
+		"2 of 3 are the newest ART build, not staged in RR.",
+	);
+
+	const none = fbcTagList(fbcTags([fbcTag("quay-operator", "4.14", "newest")]));
+	assert.match(
+		fbcTagsLead(none),
+		/^The newest ART tag of each FBC, none staged in RR/,
+	);
+	assert.equal(fbcTagsNote(none), "");
+});
+
+test("fbcUnstagedTitle and fbcNewerTitle count and agree in number", () => {
+	assert.equal(
+		fbcUnstagedTitle(1),
+		"1 FBC tag is the newest ART build, not staged in RR",
+	);
+	assert.equal(
+		fbcUnstagedTitle(3),
+		"3 FBC tags are the newest ART build, not staged in RR",
+	);
+	assert.equal(
+		fbcNewerTitle(1),
+		"ART has a newer build than the staged FBC: the list keeps the staged tag",
+	);
+	assert.equal(
+		fbcNewerTitle(2),
+		"ART has newer builds than the staged FBCs: the list keeps the staged tags",
+	);
 });

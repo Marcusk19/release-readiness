@@ -2,6 +2,7 @@ import type {
 	CIRun,
 	FBCCandidate,
 	FBCMember,
+	FBCTags,
 	ImageScan,
 	KonfluxRelease,
 	OperatorFBC,
@@ -71,6 +72,66 @@ export const fbcPullspecs = (c: FBCCandidate): string | null =>
 	c.state === "complete" && c.pullspecs.length > 0
 		? c.pullspecs.join(",")
 		: null;
+
+/** release-from-fbc's fbc-pullspecs from ART's tags, with what to tell. */
+export interface TagList {
+	/** The pullspecs, comma-separated; null while there is an error. */
+	value: string | null;
+	count: number;
+	/** How many tags are the FBC RR staged, and how many the newest build. */
+	staged: number;
+	newest: number;
+	errors: string[];
+	warnings: string[];
+	info: string[];
+}
+
+/**
+ * The tag pullspecs of a version's FBCs. A slot with no tag, no tag at all,
+ * or a pullspec that is a digest, not a tag, is an error and offers no list,
+ * as a partial list must not be released.
+ */
+export function fbcTagList(t: FBCTags): TagList {
+	const errors = [...t.errors];
+	if (errors.length === 0 && t.pullspecs.length === 0) {
+		errors.push("ART has no FBC tags for this version");
+	}
+	for (const p of t.pullspecs) {
+		if (p.includes("@")) errors.push(`${p} is a digest, not a tag`);
+	}
+	return {
+		value: errors.length > 0 ? null : t.pullspecs.join(","),
+		count: t.pullspecs.length,
+		staged: t.tags.filter((x) => x.basis === "staged").length,
+		newest: t.tags.filter((x) => x.basis === "newest").length,
+		errors,
+		warnings: t.warnings,
+		info: t.info,
+	};
+}
+
+/**
+ * What the FBC pullspecs are, before the repository they are in: the tags of
+ * the FBCs RR staged, else the newest builds.
+ */
+export const fbcTagsLead = (l: TagList): string =>
+	l.staged > 0
+		? "The ART tag of each FBC RR staged, found by its digest, in ART's public"
+		: "The newest ART tag of each FBC, none staged in RR, in ART's public";
+
+/** What to add when some of the tags are not staged FBCs; "" when all are. */
+export const fbcTagsNote = (l: TagList): string =>
+	l.staged > 0 && l.newest > 0
+		? `${l.newest} of ${l.count} are the newest ART build, not staged in RR.`
+		: "";
+
+/** The title of the alert on the slots that use the newest, unstaged build. */
+export const fbcUnstagedTitle = (n: number): string =>
+	`${n} FBC tag${n === 1 ? " is" : "s are"} the newest ART build, not staged in RR`;
+
+/** The title of the alert on the slots ART has built again since staging. */
+export const fbcNewerTitle = (n: number): string =>
+	`ART has ${n === 1 ? "a newer build" : "newer builds"} than the staged FBC${n === 1 ? "" : "s"}: the list keeps the staged tag${n === 1 ? "" : "s"}`;
 
 /** Compares dot-separated versions numerically: OCP 4.9 is lower than 4.12. */
 export function compareVersions(a: string, b: string): number {
@@ -537,6 +598,62 @@ export function fbcParams(
 	if (date) params["target-release-date"] = date.slice(0, 10);
 	params["dry-run"] = "true";
 	return params;
+}
+
+/** The Jira status release-from-fbc's advisory takes issues in. */
+export const RELEASE_PENDING = "Release Pending";
+
+/** An issue key's number: PROJQUAY-12348 is 12348. */
+const keyNumber = (key: string) => Number(key.slice(key.lastIndexOf("-") + 1));
+
+/** Issue keys by number, so PROJQUAY-9 comes before PROJQUAY-10. */
+const byKeyNumber = (a: string, b: string) =>
+	keyNumber(a) - keyNumber(b) || a.localeCompare(b);
+
+/** The issues release-from-fbc leaves out of the advisory, per status. */
+export interface LeftOut {
+	status: string;
+	keys: string[];
+}
+
+/** A release's issues split for release-from-fbc's jira-bugs. */
+export interface IssueLists {
+	/** The release's Release Pending issues, by key number, each once. */
+	keys: string[];
+	/** The other issues by status, the largest group first; the release ticket is no issue. */
+	leftOut: LeftOut[];
+}
+
+/**
+ * Splits issues for jira-bugs: only Release Pending ones go in, the release
+ * ticket is no advisory issue, and the rest are listed by status so none
+ * vanishes silently. Undefined while issues is, still loading.
+ */
+export function issueLists(
+	issues: { key: string; status: string }[] | undefined,
+	ticketKey?: string,
+): IssueLists | undefined {
+	if (!issues) return undefined;
+	const keys = new Set<string>();
+	const others = new Map<string, Set<string>>();
+	for (const { key, status } of issues) {
+		if (key === ticketKey) continue;
+		if (status === RELEASE_PENDING) {
+			keys.add(key);
+			continue;
+		}
+		const name = status || "No status";
+		others.set(name, (others.get(name) ?? new Set()).add(key));
+	}
+	return {
+		keys: [...keys].sort(byKeyNumber),
+		leftOut: [...others]
+			.map(([status, set]) => ({ status, keys: [...set].sort(byKeyNumber) }))
+			.sort(
+				(a, b) =>
+					b.keys.length - a.keys.length || a.status.localeCompare(b.status),
+			),
+	};
 }
 
 /** The tkn command that starts release-from-fbc with params. */
