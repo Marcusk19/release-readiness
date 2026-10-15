@@ -1,4 +1,5 @@
 import {
+	Button,
 	Card,
 	CardBody,
 	CardTitle,
@@ -7,54 +8,60 @@ import {
 	DescriptionListGroup,
 	DescriptionListTerm,
 	EmptyState,
+	EmptyStateActions,
 	EmptyStateBody,
+	EmptyStateFooter,
 	Flex,
 	FlexItem,
 	Gallery,
 	Label,
 	PageSection,
+	Popover,
 	Spinner,
+	Stack,
 	Switch,
 	Title,
-	ToggleGroup,
-	ToggleGroupItem,
 	Toolbar,
 	ToolbarContent,
-	ToolbarGroup,
 	ToolbarItem,
 } from "@patternfly/react-core";
-import { ListIcon, ThIcon } from "@patternfly/react-icons";
+import { CubesIcon } from "@patternfly/react-icons";
 import { Link, useSearchParams } from "react-router-dom";
-import { listReleasesOverview } from "../api/client";
+import { getCandidate, listReleasesOverview } from "../api/client";
 import type {
 	IssueSummary,
 	ReadinessResponse,
 	ReleaseVersion,
 	ShipmentMR,
 } from "../api/types";
-import LoadError from "../components/LoadError";
+import { Blockers } from "../components/Blockers";
+import LoadError, { Loading } from "../components/LoadError";
 import { external } from "../components/OperatorImages";
 import { mrLink } from "../components/ShipmentLabels";
+import { Status } from "../components/Status";
 import { useCachedFetch } from "../hooks/useCachedFetch";
 import { useConfig } from "../hooks/useConfig";
+import { blockers, splitBlockers } from "../utils/blockers";
+import { SHOW_CVES } from "../utils/features";
 import { day } from "../utils/format";
 import { formatReleaseName, jiraIssueUrl } from "../utils/links";
+import { verdictLine } from "../utils/releaseDetail";
 import { cardStatus, shipmentChip, shipmentText } from "../utils/shipment";
-
-type ViewMode = "compact" | "expanded";
 
 const muted = { color: "var(--pf-t--global--text--color--subtle)" };
 
+// A blockers popover's one width: one set before its blockers load keeps it
+// beside its label, as Popper does not re-place it when it grows.
+const popoverWidth = "min(40rem, calc(100vw - 4rem))";
+
 export default function ReleasesOverview() {
 	const [searchParams, setSearchParams] = useSearchParams();
-	const viewMode = (searchParams.get("view") ?? "compact") as ViewMode;
 	const showAll = searchParams.get("all") === "1";
 
 	const config = useConfig();
 
 	const {
 		data: overviews,
-		loading,
 		error,
 		refetch,
 	} = useCachedFetch("releasesOverview", listReleasesOverview);
@@ -62,7 +69,7 @@ export default function ReleasesOverview() {
 	const setParam = (key: string, value: string) => {
 		setSearchParams((prev) => {
 			const next = new URLSearchParams(prev);
-			if (value && value !== "compact") {
+			if (value) {
 				next.set(key, value);
 			} else {
 				next.delete(key);
@@ -71,15 +78,15 @@ export default function ReleasesOverview() {
 		});
 	};
 
-	if (loading && !overviews) {
+	if (!overviews && !error) {
 		return (
 			<PageSection>
-				<EmptyState icon={Spinner} titleText="Loading releases…" />
+				<Loading title="Loading releases…" />
 			</PageSection>
 		);
 	}
 
-	if (!overviews && error) {
+	if (!overviews) {
 		return (
 			<PageSection>
 				<LoadError title="Could not load releases" onRetry={refetch}>
@@ -100,21 +107,25 @@ export default function ReleasesOverview() {
 	if (overviewList.length === 0) {
 		return (
 			<PageSection>
-				<EmptyState>
-					<Title headingLevel="h2" size="lg">
-						No releases found
-					</Title>
+				<EmptyState
+					icon={CubesIcon}
+					titleText="No releases yet"
+					headingLevel="h2"
+				>
 					<EmptyStateBody>
-						No active releases discovered from JIRA. Ensure the JIRA sync is
-						configured and release tickets with component
-						&quot;-area/release&quot; exist.
+						Releases appear once the Jira sync finds them.
 					</EmptyStateBody>
+					<EmptyStateFooter>
+						<EmptyStateActions>
+							<a href="/api/v1/sync-status" {...external}>
+								Sync status
+							</a>
+						</EmptyStateActions>
+					</EmptyStateFooter>
 				</EmptyState>
 			</PageSection>
 		);
 	}
-
-	const galleryMinWidth = viewMode === "compact" ? "300px" : "400px";
 
 	return (
 		<PageSection>
@@ -138,45 +149,38 @@ export default function ReleasesOverview() {
 					{!showAll && (
 						<ToolbarItem style={muted}>Next version in each stream</ToolbarItem>
 					)}
-					<ToolbarGroup align={{ default: "alignEnd" }}>
-						<ToolbarItem>
-							<ToggleGroup aria-label="View mode">
-								<ToggleGroupItem
-									icon={<ListIcon />}
-									aria-label="Compact view"
-									isSelected={viewMode === "compact"}
-									onChange={() => setParam("view", "compact")}
-								/>
-								<ToggleGroupItem
-									icon={<ThIcon />}
-									aria-label="Expanded view"
-									isSelected={viewMode === "expanded"}
-									onChange={() => setParam("view", "expanded")}
-								/>
-							</ToggleGroup>
-						</ToolbarItem>
-					</ToolbarGroup>
 				</ToolbarContent>
 			</Toolbar>
 
-			<Gallery
-				component="ul"
-				hasGutter
-				minWidths={{ default: galleryMinWidth }}
-			>
-				{visible.map((ov) => (
-					<ReleaseCard
-						key={ov.release.name}
-						release={ov.release}
-						issueSummary={ov.issue_summary}
-						readinessSignal={ov.readiness}
-						latestBuild={ov.latest_build}
-						shipmentMR={ov.shipment_mr}
-						viewMode={viewMode}
-						jiraBaseUrl={config?.jira_base_url}
-					/>
-				))}
-			</Gallery>
+			{visible.length === 0 ? (
+				<EmptyState
+					icon={CubesIcon}
+					titleText="No next version in any stream"
+					headingLevel="h2"
+				>
+					<EmptyStateFooter>
+						<EmptyStateActions>
+							<Button variant="primary" onClick={() => setParam("all", "1")}>
+								Show all versions
+							</Button>
+						</EmptyStateActions>
+					</EmptyStateFooter>
+				</EmptyState>
+			) : (
+				<Gallery component="ul" hasGutter minWidths={{ default: "300px" }}>
+					{visible.map((ov) => (
+						<ReleaseCard
+							key={ov.release.name}
+							release={ov.release}
+							issueSummary={ov.issue_summary}
+							readinessSignal={ov.readiness}
+							latestBuild={ov.latest_build}
+							shipmentMR={ov.shipment_mr}
+							jiraBaseUrl={config?.jira_base_url}
+						/>
+					))}
+				</Gallery>
+			)}
 		</PageSection>
 	);
 }
@@ -187,7 +191,6 @@ function ReleaseCard({
 	readinessSignal,
 	latestBuild,
 	shipmentMR,
-	viewMode,
 	jiraBaseUrl,
 }: {
 	release: ReleaseVersion;
@@ -195,7 +198,6 @@ function ReleaseCard({
 	readinessSignal: ReadinessResponse;
 	latestBuild?: string;
 	shipmentMR: ShipmentMR | null;
-	viewMode: ViewMode;
 	jiraBaseUrl?: string;
 }) {
 	const target = release.due_date ?? release.release_date;
@@ -225,8 +227,11 @@ function ReleaseCard({
 				year: "numeric",
 			})
 		: "No image snapshot yet";
+	// The status label or the Readiness row already says there is none.
+	const showSnapshot = readinessSignal.message !== lastBuild;
 
 	const displayName = formatReleaseName(release.name);
+	const releasePath = `/releases/${encodeURIComponent(release.name)}`;
 
 	const ticket =
 		release.release_ticket_key && jiraBaseUrl ? (
@@ -251,12 +256,49 @@ function ReleaseCard({
 				>
 					<FlexItem>
 						<Title headingLevel="h2" size="md">
-							<Link to={`/releases/${encodeURIComponent(release.name)}`}>
-								{displayName}
-							</Link>
+							<Link to={releasePath}>{displayName}</Link>
 						</Title>
 					</FlexItem>
-					{status && (
+					{status && readinessSignal.signal !== "green" && (
+						<FlexItem>
+							<Popover
+								aria-label={`Why ${displayName} is not shipped`}
+								position="bottom-start"
+								flipBehavior={[
+									"bottom-start",
+									"bottom-end",
+									"top-start",
+									"top-end",
+								]}
+								minWidth={popoverWidth}
+								maxWidth={popoverWidth}
+								bodyContent={<CardBlockers release={release} />}
+								footerContent={
+									<>
+										<Link to={releasePath}>View release</Link>
+										{status.link && shipmentMR && (
+											<>
+												{" · "}
+												<a href={shipmentMR.web_url} {...external}>
+													Open shipment MR
+												</a>
+											</>
+										)}
+									</>
+								}
+							>
+								{/* onClick renders the Label as a button, so it takes focus, Enter and Space; the Popover toggles itself. */}
+								<Label
+									status={status.status}
+									isCompact
+									onClick={() => undefined}
+								>
+									{status.text}
+								</Label>
+							</Popover>
+						</FlexItem>
+					)}
+					{status && readinessSignal.signal === "green" && (
 						<FlexItem>
 							<Label
 								status={status.status}
@@ -274,86 +316,98 @@ function ReleaseCard({
 				</Flex>
 			</CardTitle>
 			<CardBody>
-				{viewMode === "compact" ? (
-					<DescriptionList isCompact isHorizontal>
-						{targetDate && (
-							<DescriptionListGroup>
-								<DescriptionListTerm>Target</DescriptionListTerm>
-								<DescriptionListDescription>
-									{targetDate}
-								</DescriptionListDescription>
-							</DescriptionListGroup>
-						)}
+				<DescriptionList isCompact isHorizontal>
+					{targetDate && (
+						<DescriptionListGroup>
+							<DescriptionListTerm>Target</DescriptionListTerm>
+							<DescriptionListDescription>
+								{targetDate}
+							</DescriptionListDescription>
+						</DescriptionListGroup>
+					)}
+					{showSnapshot && (
 						<DescriptionListGroup>
 							<DescriptionListTerm>Image snapshot</DescriptionListTerm>
 							<DescriptionListDescription>
 								{lastBuild}
 							</DescriptionListDescription>
 						</DescriptionListGroup>
-						{release.release_ticket_key && (
-							<DescriptionListGroup>
-								<DescriptionListTerm>Ticket</DescriptionListTerm>
-								<DescriptionListDescription>
-									{ticket}
-								</DescriptionListDescription>
-							</DescriptionListGroup>
-						)}
-						{shipment && (
-							<DescriptionListGroup>
-								<DescriptionListTerm>Shipment</DescriptionListTerm>
-								<DescriptionListDescription>
-									{shipment}
-								</DescriptionListDescription>
-							</DescriptionListGroup>
-						)}
-						{readiness && (
-							<DescriptionListGroup>
-								<DescriptionListTerm>Readiness</DescriptionListTerm>
-								<DescriptionListDescription>
-									{readiness}
-								</DescriptionListDescription>
-							</DescriptionListGroup>
-						)}
-					</DescriptionList>
-				) : (
-					<Flex justifyContent={{ default: "justifyContentSpaceBetween" }}>
-						{targetDate && (
-							<FlexItem>
-								<span className="rr-label">Target</span>
-								<div>{targetDate}</div>
-							</FlexItem>
-						)}
-						{release.release_ticket_key && (
-							<FlexItem>
-								<span className="rr-label">Ticket</span>
-								<div>{ticket}</div>
-							</FlexItem>
-						)}
-						<FlexItem>
-							<span className="rr-label">Image snapshot</span>
-							<div>{lastBuild}</div>
-						</FlexItem>
-						{shipment && (
-							<FlexItem>
-								<span className="rr-label">Shipment</span>
-								<div>{shipment}</div>
-							</FlexItem>
-						)}
-						{readiness && (
-							<FlexItem>
-								<span className="rr-label">Readiness</span>
-								<div>{readiness}</div>
-							</FlexItem>
-						)}
-						{issueSummary && issueSummary.cves > 0 && (
-							<FlexItem>
-								<span className="rr-label">CVEs</span>
-								<div>{issueSummary.cves}</div>
-							</FlexItem>
-						)}
-					</Flex>
-				)}
+					)}
+					{release.release_ticket_key && (
+						<DescriptionListGroup>
+							<DescriptionListTerm>Ticket</DescriptionListTerm>
+							<DescriptionListDescription>{ticket}</DescriptionListDescription>
+						</DescriptionListGroup>
+					)}
+					{shipment && (
+						<DescriptionListGroup>
+							<DescriptionListTerm>Shipment</DescriptionListTerm>
+							<DescriptionListDescription>
+								{shipment}
+							</DescriptionListDescription>
+						</DescriptionListGroup>
+					)}
+					{readiness && (
+						<DescriptionListGroup>
+							<DescriptionListTerm>Readiness</DescriptionListTerm>
+							<DescriptionListDescription>
+								{readiness}
+							</DescriptionListDescription>
+						</DescriptionListGroup>
+					)}
+					{SHOW_CVES && issueSummary && issueSummary.cves > 0 && (
+						<DescriptionListGroup>
+							<DescriptionListTerm>CVE tickets</DescriptionListTerm>
+							<DescriptionListDescription>
+								{issueSummary.cves}
+							</DescriptionListDescription>
+						</DescriptionListGroup>
+					)}
+				</DescriptionList>
 			</CardBody>
 		</Card>
+	);
+}
+
+/**
+ * A release's verdict and grouped blockers, fetched when first shown: the
+ * overview carries no verdict items.
+ */
+function CardBlockers({ release }: { release: ReleaseVersion }) {
+	const config = useConfig();
+	const { data, error, refetch } = useCachedFetch(
+		`candidate:${release.name}`,
+		() => getCandidate(release.name),
+	);
+	if (!data) {
+		return error ? (
+			<LoadError
+				variant="xs"
+				title="Could not load the blockers"
+				onRetry={refetch}
+			>
+				The server did not return this release's candidate.
+			</LoadError>
+		) : (
+			<Spinner size="md" aria-label="Loading blockers" />
+		);
+	}
+	const head = verdictLine(data.verdict);
+	const { blocking, rest } = splitBlockers(
+		blockers(data, release.name, release.konflux_application ?? "", config),
+	);
+	return (
+		<Stack hasGutter>
+			<Status status={head.status}>
+				<strong>{head.text}</strong>
+			</Status>
+			{blocking.length > 0 && <Blockers groups={blocking} />}
+			{rest.length > 0 && (
+				<Title headingLevel="h4" size="md">
+					Warnings and notes
+				</Title>
+			)}
+			{rest.length > 0 && <Blockers groups={rest} />}
+		</Stack>
 	);
 }

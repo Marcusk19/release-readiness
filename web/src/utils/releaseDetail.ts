@@ -3,7 +3,6 @@ import type {
 	FBCCandidate,
 	FBCMember,
 	ImageScan,
-	JiraIssue,
 	KonfluxRelease,
 	OperatorFBC,
 	OperatorImage,
@@ -15,6 +14,7 @@ import type {
 	Verdict,
 	VerdictItem,
 } from "../api/types";
+import { SHOW_CVES } from "./features.ts";
 import { relative } from "./format.ts";
 
 // A "-nightly" segment, at the end or before a suffix like "-fips".
@@ -155,7 +155,8 @@ export const slotItem = (
 
 /** A chip on an FBC row, flagging an exception. */
 export interface Chip {
-	color: "red" | "orange" | "grey";
+	/** Its PF Label status; none for a note that is not a problem. */
+	status?: "danger" | "warning";
 	text: string;
 	title?: string;
 }
@@ -170,9 +171,9 @@ export function rowChips(
 ): Chip[] {
 	const chips: Chip[] = [];
 	if (shipped) return chips;
-	if (r.kind === "missing") chips.push({ color: "red", text: "no FBC" });
+	if (r.kind === "missing") chips.push({ status: "danger", text: "no FBC" });
 	if (unreadable)
-		chips.push({ color: "red", text: "can't read", title: unreadable });
+		chips.push({ status: "danger", text: "can't read", title: unreadable });
 	return chips;
 }
 
@@ -186,7 +187,7 @@ export function otherBundle(
 	const nvr = r.kind === "other" ? r.fbc?.head_bundle_nvr : "";
 	if (!nvr) return null;
 	return {
-		text: `holds bundle ${bundleBuilt(nvr) || nvrLabel(nvr)}`,
+		text: `holds an older bundle (${bundleBuilt(nvr) || nvrLabel(nvr)})`,
 		title: nvr,
 		href: r.fbc?.build_url || null,
 	};
@@ -199,6 +200,24 @@ export type RunPill = CIRun & {
 	/** It installed another FBC of this OCP version on the same bundle. */
 	equivalent: boolean;
 };
+
+const runResults: Record<string, [StatusLine["status"] | undefined, string]> = {
+	success: ["done", "Passed"],
+	failure: ["failed", "Failed"],
+	error: ["failed", "Error"],
+	pending: ["running", "Running"],
+	triggered: ["running", "Pending"],
+	aborted: [undefined, "Aborted"],
+};
+
+/** A Prow run state as its Status and word; an unknown one has no status. */
+export function runResult(state: string): {
+	status?: StatusLine["status"];
+	text: string;
+} {
+	const [status, text] = runResults[state] ?? [undefined, state];
+	return { status, text };
+}
 
 /** An exception on an FBC row; otherBundle's links its FBC's build. */
 export type Flag = Chip & { href?: string | null };
@@ -245,7 +264,7 @@ export function fbcGroups(
 					unreadable: slotItem(items, "read_failed", o.operator, r.ocp)?.text,
 				});
 				const held = otherBundle(r);
-				if (held) flags.push({ color: "orange", ...held });
+				if (held) flags.push({ status: "warning", ...held });
 				return {
 					operator: o.operator,
 					ocp: r.ocp,
@@ -310,11 +329,6 @@ const day = (iso: string) =>
 		day: "numeric",
 	});
 
-// The next action on a blocker on the whole release, by its code.
-const blockerActions: Record<string, string> = {
-	not_staged: "Stage the candidate",
-};
-
 /**
  * A line of the verdict's list: a level's items of one code. text is a whole
  * release item's own, else the code in a word or two.
@@ -325,8 +339,6 @@ export interface VerdictEntry {
 	count: number;
 	/** What its items are on: "quay-operator OCP 4.14, 4.15"; "" on the whole release. */
 	on: string;
-	/** The next action, "" without one. */
-	action: string;
 	/** Each item's text and owner. */
 	tip: string[];
 }
@@ -350,7 +362,6 @@ export function verdictEntries(v: Verdict): VerdictEntry[] {
 			text: i.operator ? (actionWords[i.code] ?? i.text) : i.text,
 			count: 0,
 			on: "",
-			action: blockerActions[i.code] ?? "",
 			tip: [],
 			ocps: new Map<string, string[]>(),
 		};
@@ -488,14 +499,6 @@ export function releaseLine(r: KonfluxRelease): StatusLine {
 	return { status: "running", text: "Release in progress" };
 }
 
-/** A Release in a word or two: when it was released, else failed or in progress. */
-export function releaseWord(r: KonfluxRelease): string {
-	const { status } = releaseLine(r);
-	if (status === "failed") return "Failed";
-	if (status === "running") return "In progress";
-	return r.completion_time ? relative(r.completion_time) : "Released";
-}
-
 // What each verdict item code asks for, in a word or two.
 const actionWords: Record<string, string> = {
 	missing_operator: "Not staged",
@@ -560,11 +563,6 @@ export const SEVERITY_COLORS = {
 	unknown: "grey",
 } as const;
 
-export const BASES: Record<ScanCounts["basis"], string> = {
-	scanner_arch_findings: "Counted per architecture",
-	unique_cves: "Unique CVEs across architectures",
-};
-
 /**
  * A scanned image's cell: a label per severity with fixable CVEs. The no-fix
  * ones, hundreds per image, would drown it.
@@ -576,21 +574,21 @@ export const fixableLabels = ({ fixable }: ScanCounts) =>
 	}));
 
 /**
- * The CVEs cell of a candidate image without counts: its text, colour and
+ * The CVEs cell of a candidate image without counts: its text, status and
  * link. A pending or unread scan is a muted dash.
  */
 export function scanCell(scan: ImageScan | null): {
 	text: string;
-	color: "orange" | "grey";
+	status?: "warning";
 	url?: string;
 } {
 	switch (scan?.state) {
 		case "scan_failed":
-			return { text: "scan failed", color: "orange", url: scan.url };
+			return { text: "scan failed", status: "warning", url: scan.url };
 		case "not_scanned":
-			return { text: "not scanned", color: "grey", url: scan.url };
+			return { text: "not scanned", url: scan.url };
 		default:
-			return { text: "-", color: "grey" };
+			return { text: "-" };
 	}
 }
 
@@ -650,40 +648,41 @@ export function releaseImages(
 
 /**
  * An image's issues: a pullspec off registry.redhat.io; for one ART built, not
- * on stage, built as another version, or its scan unread or with fixable
- * critical or high CVEs.
+ * on stage, built as another version, or with SHOW_CVES its scan unread or
+ * with fixable critical or high CVEs.
  */
 function imageIssues({ image: i, repos }: ReleaseImage, version: string) {
 	const issues: Flag[] = [];
 	const off = repos.filter((r) => !r.startsWith("registry.redhat.io/"));
 	if (off.length > 0)
 		issues.push({
-			color: "red",
+			status: "danger",
 			text: "not registry.redhat.io",
 			title: off.join("\n"),
 		});
 	if (!i.nvr) return issues;
-	if (!i.stage) issues.push({ color: "red", text: "not on stage" });
+	if (!i.stage) issues.push({ status: "danger", text: "not on stage" });
 	const built = nvrVersion(i.nvr);
 	if (built && built !== version)
-		issues.push({ color: "orange", text: `${built} build`, title: i.nvr });
+		issues.push({ status: "warning", text: `${built} build`, title: i.nvr });
+	if (!SHOW_CVES) return issues;
 	const fixable = i.scan?.counts?.fixable;
 	if (fixable && fixable.critical + fixable.high > 0)
 		issues.push({
-			color: "red",
+			status: "danger",
 			text: `${fixable.critical + fixable.high} fixable critical/high`,
 		});
-	else if (!i.scan) issues.push({ color: "grey", text: "scan pending" });
+	else if (!i.scan) issues.push({ text: "scan pending" });
 	else if (i.scan.state !== "scanned")
 		issues.push({ ...scanCell(i.scan), title: i.scan.url });
 	return issues;
 }
 
-const ranks = { red: 0, orange: 1, grey: 2 };
+const rank = (f: Flag) =>
+	f.status === "danger" ? 0 : f.status === "warning" ? 1 : 2;
 
-/** An image's worst issue's rank, 0 for red; 3 without one. */
-export const worst = (r: ReleaseImage) =>
-	Math.min(3, ...r.issues.map((f) => ranks[f.color]));
+/** An image's worst issue's rank, 0 for danger; 3 without one. */
+export const worst = (r: ReleaseImage) => Math.min(3, ...r.issues.map(rank));
 
 // The syncs the candidate verdict reads (handlers_candidate.go): konflux its
 // Snapshots and Releases, art-builds their images' NVRs, art-history the
@@ -697,6 +696,21 @@ const VERDICT_SOURCES = [
 	"konflux",
 ];
 
+// Sync source ids as the page names them.
+export const SOURCE_NAMES: Record<string, string> = {
+	konflux: "Konflux releases",
+	"art-builds": "ART builds",
+	"art-history": "ART build history",
+	"fbc-render": "FBC reads",
+	jira: "Jira",
+	catalog: "Catalog",
+	prow: "Prow",
+	"shipment-mrs": "Shipment MRs",
+	"image-scans": "Image scans",
+	reconcile: "FBC Jira reconcile",
+	retention: "Retention",
+};
+
 /**
  * How fresh the verdict's data is: its failing or stale syncs, if any, else
  * when the least recent of them last succeeded. Null while one has yet to
@@ -707,16 +721,11 @@ export function freshnessLine(
 ): { text: string; problems: SyncProblem[] } | null {
 	const problems = s.problems.filter((p) => VERDICT_SOURCES.includes(p.source));
 	if (problems.length > 0) {
-		// Failing sources carry since; stale ones do not.
-		const failing = problems.filter((p) => p.since).map((p) => p.source);
-		const stale = problems.filter((p) => !p.since).map((p) => p.source);
-		const what = [];
-		if (failing.length) what.push(`${failing.join(", ")} failing`);
-		if (stale.length) what.push(`${stale.join(", ")} stale`);
-		return {
-			text: `Data may be stale: ${what.join(", ")}, last success ${oldest(problems.map((p) => p.last_success))}`,
-			problems,
-		};
+		const what =
+			problems.length === 1
+				? (SOURCE_NAMES[problems[0].source] ?? problems[0].source)
+				: `${problems.length} sources`;
+		return { text: `Stale: ${what}`, problems };
 	}
 	const last = s.sources
 		.filter((f) => VERDICT_SOURCES.includes(f.source))
@@ -732,15 +741,10 @@ function oldest(times: (string | null)[]): string {
 	return relative(new Date(t).toISOString());
 }
 
-/** A version's fixVersion issues without its release ticket. */
-export function splitTickets(issues: JiraIssue[], ticketKey?: string) {
-	return { work: issues.filter((i) => i.key !== ticketKey) };
-}
-
 /** The backend's no-FBC reasons in release terms, each with what to do next. */
 const noFbcReasons: Record<string, string> = {
 	"no Konflux application":
-		"Its JIRA fixVersion maps to no Konflux application; check the fixVersion name.",
+		"Its Jira fixVersion maps to no Konflux application; check the fixVersion name.",
 	"not a concrete quay-vX.Y.Z version":
 		"Only Quay versions named quay-vX.Y.Z have FBC builds.",
 	"no release candidate yet":

@@ -5,7 +5,6 @@ import type {
 	FBCCandidate,
 	FBCMember,
 	ImageScan,
-	JiraIssue,
 	KonfluxRelease,
 	OperatorFBC,
 	OperatorImage,
@@ -33,13 +32,12 @@ import {
 	readingLine,
 	releaseImages,
 	releaseLine,
-	releaseWord,
 	rowChips,
+	runResult,
 	scanCell,
 	shownOperators,
 	slotItem,
 	slotRows,
-	splitTickets,
 	tknCommand,
 	verdictEntries,
 	verdictLine,
@@ -168,18 +166,6 @@ test("releaseLine", () => {
 		),
 		{ status: "done", text: "Released" },
 	);
-	assert.equal(releaseWord(release({ released_status: "True" })), "Released");
-	assert.match(
-		releaseWord(
-			release({
-				released_status: "True",
-				completion_time: new Date(Date.now() - 2 * 86_400_000).toISOString(),
-			}),
-		),
-		/2 days ago/,
-	);
-	assert.equal(releaseWord(release({ released_reason: "Failed" })), "Failed");
-	assert.equal(releaseWord(release({})), "In progress");
 });
 
 test("artGroup: the application's X.Y dotted", () => {
@@ -236,10 +222,8 @@ const fbcMember = (
 	nvr: `quay-operator-fbc-3.17.6-20261012000000.ocp${ocp}`,
 	build_url: "",
 	head_bundle_nvr: head,
-	snapshot: "",
 	release: null,
 	ci: { exact: [], equivalent: [] },
-	staged: 0,
 	...m,
 });
 
@@ -251,26 +235,18 @@ const operatorFBC = (
 ): OperatorFBC => ({
 	operator,
 	head_bundle_nvr: head,
-	channel: "stable-3.17",
-	head_csv: "",
-	coverage: { members: members.length, slots: members.length },
 	members,
 	missing_ocp: [],
 	conflicts: [],
 	fbc_ri_stage: { state: "none", release: null },
-	image_check: { state: "absent", snapshot: "", bundle_nvr: "" },
 	images: [],
-	compare: [],
-	stage: { staged: 0, total: 0 },
 	...o,
 });
 
 const fbcCandidate = (c: Partial<FBCCandidate>): FBCCandidate => ({
 	source: "stage_snapshots",
 	state: "complete",
-	errors: [],
 	operators: [],
-	unknown: [],
 	pullspecs: [],
 	...c,
 });
@@ -282,10 +258,7 @@ test("stream only, no stage (3.16): pullspecs from the stream", () => {
 	const c = fbcCandidate({
 		source: "stream",
 		operators: ["quay-operator", "container-security-operator"].map((o) =>
-			operatorFBC(o, head, members, {
-				channel: "stable-3.16",
-				head_csv: "quay-operator.v3.99.0-dev",
-			}),
+			operatorFBC(o, head, members),
 		),
 		pullspecs: [members[0].pullspec, members[1].pullspec],
 	});
@@ -305,20 +278,14 @@ test("missing operator (3.17.6): CSO and QBO not in stage show the stream's FBCs
 		"quay-operator",
 		head,
 		["4.12", "4.13", "4.14"].map((v) =>
-			fbcMember(v, head, { snapshot: "s", release: released }),
+			fbcMember(v, head, { release: released }),
 		),
 	);
 	const cso = operatorFBC("container-security-operator", "", [], {
 		missing_ocp: ["4.14", "4.12"],
-		coverage: { members: 0, slots: 2 },
 	});
-	const errors = [
-		"container-security-operator is not in stage",
-		"quay-bridge-operator is not in stage",
-	];
 	const c = fbcCandidate({
 		state: "incomplete",
-		errors,
 		operators: [qo, cso, operatorFBC("quay-bridge-operator", "", [])],
 	});
 	const streamCSO = operatorFBC(
@@ -367,14 +334,10 @@ test("mixed slots (CSO 7 on ...0313, 2 on ...1613): inconsistent, the others in 
 		["4.19", "4.20"].map((v) => fbcMember(v, head)),
 		{
 			conflicts: all.slice(0, 7).map((v) => fbcMember(v, other)),
-			coverage: { members: 2, slots: 9 },
 		},
 	);
 	const c = fbcCandidate({
 		state: "inconsistent",
-		errors: [
-			"container-security-operator heads more than one bundle across its OCP versions",
-		],
 		operators: [cso],
 		pullspecs: ["x"],
 	});
@@ -500,17 +463,16 @@ test("verdictEntries: the headline counts every listed blocker (3.16.7)", () => 
 	};
 	const entries = verdictEntries(v);
 	assert.deepEqual(
-		entries.map((e) => [e.level, e.text, e.count, e.on, e.action]),
+		entries.map((e) => [e.level, e.text, e.count, e.on]),
 		[
-			["blocker", "Not in a stage shipment", 1, "", "Stage the candidate"],
+			["blocker", "Not in a stage shipment", 1, ""],
 			[
 				"blocker",
 				"Mixed bundles",
 				2,
 				"quay-operator; container-security-operator",
-				"",
 			],
-			["info", "Newer build", 1, "quay-operator", ""],
+			["info", "Newer build", 1, "quay-operator"],
 		],
 	);
 	assert.deepEqual(entries[0].tip, [
@@ -583,8 +545,7 @@ test("rowChips: exceptions only, per row", () => {
 		kind: "member" as const,
 		fbc: fbcMember("4.14", head, m),
 	});
-	assert.deepEqual(chips(member({ release: ok, staged: 1 })), []);
-	assert.deepEqual(chips(member({ release: ok, staged: 3 })), []);
+	assert.deepEqual(chips(member({ release: ok })), []);
 	assert.deepEqual(chips(member({ release: failed })), []);
 	const held = {
 		ocp: "4.21",
@@ -593,7 +554,7 @@ test("rowChips: exceptions only, per row", () => {
 	};
 	assert.deepEqual(chips(held), []);
 	assert.deepEqual(otherBundle(held), {
-		text: "holds bundle Oct 12 16:13",
+		text: "holds an older bundle (Oct 12 16:13)",
 		title: other,
 		href: "https://art/builds/1",
 	});
@@ -626,7 +587,7 @@ test("rowChips: exceptions only, per row", () => {
 		"4.20",
 	)?.text;
 	assert.deepEqual(rowChips(unread, { shipped: false, unreadable: why }), [
-		{ color: "red", text: "can't read", title: items[0].text },
+		{ status: "danger", text: "can't read", title: items[0].text },
 	]);
 });
 
@@ -643,7 +604,6 @@ test("record mode: no prompts, only facts", () => {
 				kind: "other",
 				fbc: fbcMember("4.14", bundle("202610121613"), {
 					release: failed,
-					staged: 2,
 				}),
 			},
 			{ shipped: true, unreadable: "x" },
@@ -702,7 +662,6 @@ const image = (name: string, digest: string): OperatorImage => ({
 	commit: "",
 	build_url: "",
 	stage: false,
-	prod: false,
 	scan: null,
 });
 
@@ -742,11 +701,8 @@ test("fbcGroups and needsAttention: a failed stage, a flag or a failed run", () 
 		shipped: false,
 		candidate: null,
 		reason: "",
-		catalogs: null,
-		unshipped_builds: null,
 		fbc_candidate: fbcCandidate({ operators: [qo] }),
 		fbc_stream: null,
-		ci_history: null,
 		verdict: {
 			state: "not_ready",
 			items: [
@@ -766,7 +722,7 @@ test("fbcGroups and needsAttention: a failed stage, a flag or a failed run", () 
 		[
 			["4.12", "Staged Oct 7", []],
 			["4.13", "Stage failed", []],
-			["4.14", null, ["holds bundle Oct 5 01:01"]],
+			["4.14", null, ["holds an older bundle (Oct 5 01:01)"]],
 			["4.15", null, ["no FBC"]],
 			["4.16", "Staged Oct 7", []],
 		],
@@ -812,7 +768,7 @@ test("fbcGroups and needsAttention: a failed stage, a flag or a failed run", () 
 		},
 	});
 	assert.deepEqual(read.rows[0].flags, [
-		{ color: "red", text: "can't read", title: unreadable },
+		{ status: "danger", text: "can't read", title: unreadable },
 	]);
 	assert.deepEqual(fbcGroups({ ...d, fbc_candidate: null }), []);
 });
@@ -838,17 +794,22 @@ test("releaseImages and worst: each digest once, with its issues", () => {
 		images.map((r) => [
 			r.label,
 			r.operators,
-			r.issues.map((f) => f.text),
+			r.issues.map((f) => [f.text, f.status]),
 			worst(r),
 		]),
 		[
 			[
 				"quay-rhel9",
 				["quay-operator", "container-security-operator"],
-				["3.18.1 build", "scan pending"],
+				[["3.18.1 build", "warning"]],
 				1,
 			],
-			["postgresql-15", ["quay-operator"], ["not registry.redhat.io"], 0],
+			[
+				"postgresql-15",
+				["quay-operator"],
+				[["not registry.redhat.io", "danger"]],
+				0,
+			],
 		],
 	);
 });
@@ -896,19 +857,38 @@ test("scanCell", () => {
 	});
 	assert.deepEqual(scanCell(scan({ state: "scan_failed" })), {
 		text: "scan failed",
-		color: "orange",
+		status: "warning",
 		url: "https://konflux.example/plr",
 	});
 	assert.deepEqual(scanCell(scan({ state: "not_scanned" })), {
 		text: "not scanned",
-		color: "grey",
 		url: "https://konflux.example/plr",
 	});
-	assert.deepEqual(scanCell(scan({ state: "pending" })), {
-		text: "-",
-		color: "grey",
-	});
-	assert.deepEqual(scanCell(null), { text: "-", color: "grey" });
+	assert.deepEqual(scanCell(scan({ state: "pending" })), { text: "-" });
+	assert.deepEqual(scanCell(null), { text: "-" });
+});
+
+test("runResult", () => {
+	assert.deepEqual(
+		[
+			"success",
+			"failure",
+			"error",
+			"pending",
+			"triggered",
+			"aborted",
+			"bogus",
+		].map(runResult),
+		[
+			{ status: "done", text: "Passed" },
+			{ status: "failed", text: "Failed" },
+			{ status: "failed", text: "Error" },
+			{ status: "running", text: "Running" },
+			{ status: "running", text: "Pending" },
+			{ status: undefined, text: "Aborted" },
+			{ status: undefined, text: "bogus" },
+		],
+	);
 });
 
 test("freshnessLine", () => {
@@ -951,9 +931,13 @@ test("freshnessLine", () => {
 	assert.deepEqual(
 		freshnessLine({ problems: [failing, jira, stale], sources }),
 		{
-			text: "Data may be stale: art-history failing, konflux stale, last success never",
+			text: "Stale: 2 sources",
 			problems: [failing, stale],
 		},
+	);
+	assert.equal(
+		freshnessLine({ problems: [stale], sources })?.text,
+		"Stale: Konflux releases",
 	);
 
 	// A source on its first pass, or none tracked, says nothing.
@@ -971,23 +955,6 @@ test("freshnessLine", () => {
 		}),
 		null,
 	);
-});
-
-const issue = (key: string, issue_type: string): JiraIssue => ({
-	key,
-	issue_type,
-	summary: "",
-	link: "",
-});
-
-test("splitTickets", () => {
-	const issues = [issue("PROJQUAY-1", "Bug"), issue("PROJQUAY-2", "Task")];
-	assert.deepEqual(splitTickets(issues, "PROJQUAY-2"), {
-		work: [issues[0]],
-	});
-	assert.deepEqual(splitTickets(issues, undefined), {
-		work: issues,
-	});
 });
 
 test("noFbcText", () => {

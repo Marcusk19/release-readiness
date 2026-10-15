@@ -1,4 +1,5 @@
 import {
+	Alert,
 	Breadcrumb,
 	BreadcrumbHeading,
 	BreadcrumbItem,
@@ -9,11 +10,11 @@ import {
 	ClipboardCopy,
 	EmptyState,
 	EmptyStateBody,
+	ExpandableSection,
 	Flex,
 	FlexItem,
 	FormSelect,
 	FormSelectOption,
-	Icon,
 	Label,
 	type LabelProps,
 	List,
@@ -24,7 +25,6 @@ import {
 	PageSection,
 	Popover,
 	Spinner,
-	Title,
 	ToggleGroup,
 	ToggleGroupItem,
 	Toolbar,
@@ -33,12 +33,7 @@ import {
 	ToolbarItem,
 	Tooltip,
 } from "@patternfly/react-core";
-import {
-	CopyIcon,
-	ExclamationCircleIcon,
-	ExclamationTriangleIcon,
-	ExternalLinkAltIcon,
-} from "@patternfly/react-icons";
+import { CopyIcon, ExternalLinkAltIcon } from "@patternfly/react-icons";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { type ReactNode, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
@@ -54,7 +49,8 @@ import type {
 	Verdict,
 	VerdictItem,
 } from "../api/types";
-import LoadError from "../components/LoadError";
+import { Blockers } from "../components/Blockers";
+import LoadError, { Loading, ReleaseNotFound } from "../components/LoadError";
 import {
 	ExtLink,
 	external,
@@ -67,6 +63,7 @@ import { Status } from "../components/Status";
 import { SyncProblems, useSyncStatus } from "../components/SyncStatusWarning";
 import { useCachedFetch } from "../hooks/useCachedFetch";
 import { useConfig } from "../hooks/useConfig";
+import { type Blocker, blockers, splitBlockers } from "../utils/blockers";
 import { days, due } from "../utils/format";
 import {
 	formatReleaseName,
@@ -90,8 +87,8 @@ import {
 	type RunPill,
 	readingLine,
 	releaseLine,
+	runResult,
 	type StatusLine,
-	splitTickets,
 	tknCommand,
 	verdictEntries,
 	verdictLine,
@@ -114,7 +111,6 @@ export default function ReleaseDetail() {
 
 	const {
 		data: release,
-		loading: loadingRelease,
 		error: releaseError,
 		refetch: refetchRelease,
 	} = useCachedFetch(`release:${version}`, () => getRelease(version!));
@@ -127,13 +123,10 @@ export default function ReleaseDetail() {
 		getCandidate(version!),
 	);
 
-	if (loadingRelease && !release) {
+	if (!release && !releaseError) {
 		return (
 			<PageSection>
-				<EmptyState
-					icon={Spinner}
-					titleText={`Loading ${formatReleaseName(version!)}…`}
-				/>
+				<Loading title={`Loading ${formatReleaseName(version!)}…`} />
 			</PageSection>
 		);
 	}
@@ -160,19 +153,12 @@ export default function ReleaseDetail() {
 	if (!release) {
 		return (
 			<PageSection>
-				<EmptyState>
-					<Title headingLevel="h2" size="lg">
-						Release not found
-					</Title>
-					<EmptyStateBody>
-						No data found for release &quot;{version}&quot;.
-					</EmptyStateBody>
-				</EmptyState>
+				<DetailBreadcrumb name={version!} />
+				<ReleaseNotFound version={version!} />
 			</PageSection>
 		);
 	}
 
-	const displayName = formatReleaseName(release.name);
 	const app = release.konflux_application ?? "";
 	const xyz = release.name.replace(/^[a-z]+-v/, "");
 	const fbc = candidate.data?.fbc_candidate;
@@ -180,19 +166,7 @@ export default function ReleaseDetail() {
 
 	return (
 		<PageSection>
-			<Flex
-				alignItems={{ default: "alignItemsCenter" }}
-				style={{ marginBottom: "1rem" }}
-			>
-				<FlexItem>
-					<Breadcrumb>
-						<BreadcrumbItem>
-							<Link to="/">Releases</Link>
-						</BreadcrumbItem>
-						<BreadcrumbHeading>{displayName}</BreadcrumbHeading>
-					</Breadcrumb>
-				</FlexItem>
-			</Flex>
+			<DetailBreadcrumb name={release.name} />
 
 			<ReleaseStatusCard
 				release={release}
@@ -204,9 +178,11 @@ export default function ReleaseDetail() {
 			<BuildsCard
 				data={candidate.data}
 				error={candidate.error}
-				loading={candidate.loading}
 				onRetry={candidate.refetch}
 				version={xyz}
+				blockers={
+					candidate.data && blockers(candidate.data, release.name, app, config)
+				}
 				konflux={konfluxUrl(
 					config?.konflux_ui_url ?? "",
 					config?.konflux_namespace ?? "",
@@ -239,11 +215,23 @@ export default function ReleaseDetail() {
 			<TicketsCard
 				issues={tickets}
 				error={ticketsError}
+				onRetry={refetchTickets}
 				version={version!}
 				config={config}
 				ticketKey={release.release_ticket_key}
 			/>
 		</PageSection>
+	);
+}
+
+function DetailBreadcrumb({ name }: { name: string }) {
+	return (
+		<Breadcrumb style={{ marginBottom: "1rem" }}>
+			<BreadcrumbItem>
+				<Link to="/">Releases</Link>
+			</BreadcrumbItem>
+			<BreadcrumbHeading>{formatReleaseName(name)}</BreadcrumbHeading>
+		</Breadcrumb>
 	);
 }
 
@@ -272,8 +260,7 @@ function ReleaseStatusCard({
 							{dueDate?.date ?? "TBD"}
 							{dueDate?.kind === "past" && (
 								<Label
-									color="red"
-									icon={<ExclamationCircleIcon />}
+									status="danger"
 									isCompact
 									style={{ marginLeft: "0.5rem" }}
 								>
@@ -282,8 +269,7 @@ function ReleaseStatusCard({
 							)}
 							{dueDate?.kind === "soon" && (
 								<Label
-									color="yellow"
-									icon={<ExclamationTriangleIcon />}
+									status="warning"
 									isCompact
 									style={{ marginLeft: "0.5rem" }}
 								>
@@ -370,18 +356,19 @@ function LinkedCardTitle({
 function BuildsCard({
 	data,
 	error,
-	loading,
 	onRetry,
 	version,
+	blockers,
 	konflux,
 	inputs,
 }: {
 	data?: ReleaseCandidate;
 	error?: Error;
-	loading: boolean;
 	onRetry: () => void;
 	/** The version's X.Y.Z. */
 	version: string;
+	/** The verdict's items as blockers to act on. */
+	blockers?: Blocker[];
 	/** The version's application in the Konflux UI. */
 	konflux: string | null;
 	/** The release command button, beside the verdict. */
@@ -394,9 +381,9 @@ function BuildsCard({
 				Release candidate
 			</LinkedCardTitle>
 			<CardBody>
-				{!data && loading ? (
-					<Spinner size="md" />
-				) : error ? (
+				{!data && !error ? (
+					<Spinner size="md" aria-label="Loading the release candidate" />
+				) : !data ? (
 					<LoadError
 						variant="xs"
 						title="Could not load the release candidate"
@@ -404,13 +391,12 @@ function BuildsCard({
 					>
 						Its builds, CI, and release status are unavailable right now.
 					</LoadError>
-				) : !data ? (
-					<Spinner size="md" />
 				) : fbc ? (
 					<Candidate
 						data={data}
 						fbc={fbc}
 						version={version}
+						blockers={blockers ?? []}
 						konflux={konflux}
 						inputs={inputs}
 					/>
@@ -433,12 +419,14 @@ function Candidate({
 	data,
 	fbc,
 	version,
+	blockers,
 	konflux,
 	inputs,
 }: {
 	data: ReleaseCandidate;
 	fbc: FBCCandidate;
 	version: string;
+	blockers: Blocker[];
 	konflux: string | null;
 	inputs?: ReactNode;
 }) {
@@ -469,6 +457,7 @@ function Candidate({
 	const read = readingLine(data.reading);
 	const prod = data.candidate?.prod;
 	const prodLine = prod && releaseLine(prod);
+	const notReady = data.verdict.state === "not_ready";
 	return (
 		<>
 			<Flex
@@ -476,11 +465,15 @@ function Candidate({
 				alignItems={{ default: "alignItemsFlexStart" }}
 				gap={{ default: "gapSm" }}
 			>
-				<FlexItem>
-					<VerdictHeader
-						verdict={data.verdict}
-						prod={data.candidate?.prod ?? null}
-					/>
+				<FlexItem flex={notReady ? { default: "flex_1" } : undefined}>
+					{notReady ? (
+						<NotReady verdict={data.verdict} blockers={blockers} />
+					) : (
+						<VerdictHeader
+							verdict={data.verdict}
+							prod={data.candidate?.prod ?? null}
+						/>
+					)}
 					{read && (
 						<div style={line}>
 							<Status status={read.status}>{read.text}</Status>
@@ -494,7 +487,7 @@ function Candidate({
 				</FlexItem>
 				{inputs && <FlexItem>{inputs}</FlexItem>}
 			</Flex>
-			{entries.length > 0 && (
+			{!notReady && entries.length > 0 && (
 				<List style={line}>
 					{entries.map((e) => (
 						<ListItem key={`${e.level} ${e.text}`}>
@@ -504,7 +497,6 @@ function Candidate({
 								</Label>
 							</Tooltip>
 							{e.on && ` ${e.on}`}
-							{e.action && <span style={muted}> · Next: {e.action}</span>}
 						</ListItem>
 					))}
 				</List>
@@ -539,7 +531,7 @@ function Candidate({
 					<ToolbarItem>
 						<ToggleGroup isCompact aria-label="FBCs shown">
 							<ToggleGroupItem
-								text={`Needs attention (${attention.length})`}
+								text={`Rows needing attention (${attention.length})`}
 								isSelected={!all}
 								onChange={() => setAll(false)}
 							/>
@@ -693,23 +685,9 @@ const levelStatus: Record<VerdictItem["level"], LabelProps["status"]> = {
 	info: "info",
 };
 
-const runStatus: Record<string, StatusLine["status"]> = {
-	success: "done",
-	failure: "failed",
-	error: "failed",
-	pending: "running",
-};
-const runStatusOf = (p: RunPill) => runStatus[p.state] ?? "warning";
-
-/** Run results as counted, worst first. */
-const runWords: [StatusLine["status"], string][] = [
-	["failed", "failed"],
-	["running", "running"],
-	["warning", "other"],
-	["done", "passed"],
-];
-const runWordOf = (p: RunPill) =>
-	runWords.find(([s]) => s === runStatusOf(p))?.[1];
+/** A run result's place when counted, worst first. */
+const severity = (s?: StatusLine["status"]) =>
+	s === "failed" ? 0 : s === "running" ? 1 : s === "done" ? 3 : 2;
 
 /**
  * An FBC row's CI: its jobs counted by result, worst first, opening a list of
@@ -717,59 +695,65 @@ const runWordOf = (p: RunPill) =>
  * the same bundle is marked "≈".
  */
 function RunSummary({ runs }: { runs: RunPill[] }) {
-	const counts = runWords
-		.map(([s, word]) => ({
-			s,
-			word,
-			n: runs.filter((p) => runStatusOf(p) === s).length,
-		}))
-		.filter((c) => c.n > 0);
+	const counts: (ReturnType<typeof runResult> & { n: number })[] = [];
+	for (const p of runs) {
+		const r = runResult(p.state);
+		const c = counts.find((c) => c.text === r.text);
+		if (c) c.n++;
+		else counts.push({ ...r, n: 1 });
+	}
+	counts.sort((a, b) => severity(a.status) - severity(b.status));
+	const summary = counts
+		.map((c) => `${c.n} ${c.text.toLowerCase()}`)
+		.join(" · ");
 	return (
 		<Popover
 			headerContent={`${runs.length} CI jobs`}
 			bodyContent={
 				<List isPlain>
-					{runs.map((p) => (
-						<ListItem key={`${p.job} ${p.equivalent}`}>
-							<a
-								href={p.prow_url}
-								aria-label={`${jobLabel(p.job)} ${runWordOf(p)}`}
-								title={[
-									`${p.job}: ${runWordOf(p)}`,
-									`Started ${when(p.started_at)}`,
-									p.install_failed && "Install failed",
-									p.runs > 1 && `Newest of ${p.runs} runs`,
-									p.equivalent &&
-										"Ran on another FBC with the same bundle; its channel graph can differ.",
-								]
-									.filter(Boolean)
-									.join("\n")}
-								{...external}
-							>
-								<Status status={runStatusOf(p)}>
-									{p.equivalent && "≈ "}
-									{jobLabel(p.job)}
-								</Status>
-							</a>
-						</ListItem>
-					))}
+					{runs.map((p) => {
+						const r = runResult(p.state);
+						const job = (
+							<>
+								{p.equivalent && "≈ "}
+								{jobLabel(p.job)}
+							</>
+						);
+						return (
+							<ListItem key={`${p.job} ${p.equivalent}`}>
+								<a
+									href={p.prow_url}
+									aria-label={`${jobLabel(p.job)} ${r.text}`}
+									title={[
+										`${p.job}: ${r.text}`,
+										`Started ${when(p.started_at)}`,
+										p.install_failed && "Install failed",
+										p.runs > 1 && `Newest of ${p.runs} runs`,
+										p.equivalent &&
+											"Ran on another FBC with the same bundle; its channel graph can differ.",
+									]
+										.filter(Boolean)
+										.join("\n")}
+									{...external}
+								>
+									{r.status ? <Status status={r.status}>{job}</Status> : job}
+								</a>
+							</ListItem>
+						);
+					})}
 				</List>
 			}
 		>
 			<Button variant="link" isInline>
-				<Status status={counts[0].s}>
-					{counts.map((c) => `${c.n} ${c.word}`).join(" · ")}
-				</Status>
+				{counts[0].status ? (
+					<Status status={counts[0].status}>{summary}</Status>
+				) : (
+					summary
+				)}
 			</Button>
 		</Popover>
 	);
 }
-
-const warningIcon = (
-	<Icon status="warning" isInline>
-		<ExclamationTriangleIcon />
-	</Icon>
-);
 
 /** Whether the version can ship; a shipped version's is its prod Release. */
 function VerdictHeader({
@@ -791,7 +775,48 @@ function VerdictHeader({
 	);
 }
 
-/** How fresh the verdict's data is; a stale line opens its sync problems. */
+/** A not ready verdict: its blockers in an Alert, then its warnings and notes. */
+function NotReady({
+	verdict,
+	blockers,
+}: {
+	verdict: Verdict;
+	blockers: Blocker[];
+}) {
+	const [open, setOpen] = useState(false);
+	const { blocking, rest } = splitBlockers(blockers);
+	return (
+		<>
+			<Alert
+				variant="danger"
+				isInline
+				isExpandable={blocking.length > 0}
+				title={
+					<>
+						{verdictLine(verdict).text}{" "}
+						<span style={{ fontWeight: "normal" }}>
+							<DataFreshness />
+						</span>
+					</>
+				}
+			>
+				{blocking.length > 0 && <Blockers groups={blocking} />}
+			</Alert>
+			{rest.length > 0 && (
+				<ExpandableSection
+					style={line}
+					toggleText={`${rest.length} warning${rest.length === 1 ? "" : "s"} and notes`}
+					isExpanded={open}
+					onToggle={(_e, v) => setOpen(v)}
+				>
+					<Blockers groups={rest} />
+				</ExpandableSection>
+			)}
+		</>
+	);
+}
+
+/** How fresh the verdict's data is; a stale label opens its sync problems. */
 function DataFreshness() {
 	const status = useSyncStatus();
 	const line = status && freshnessLine(status);
@@ -803,9 +828,10 @@ function DataFreshness() {
 			headerContent="Sync problems"
 			bodyContent={<SyncProblems problems={line.problems} />}
 		>
-			<Button variant="link" isInline icon={warningIcon}>
+			{/* The Popover opens on click; onClick makes the Label a focusable button. */}
+			<Label isCompact variant="outline" status="warning" onClick={() => {}}>
 				{line.text}
-			</Button>
+			</Label>
 		</Popover>
 	);
 }
@@ -870,17 +896,19 @@ const line = { marginTop: "0.5rem" };
 function TicketsCard({
 	issues,
 	error,
+	onRetry,
 	version,
 	config,
 	ticketKey,
 }: {
 	issues?: JiraIssue[];
 	error?: Error;
+	onRetry: () => void;
 	version: string;
 	config?: DashboardConfig;
 	ticketKey?: string;
 }) {
-	const { work } = splitTickets(issues ?? [], ticketKey);
+	const work = (issues ?? []).filter((i) => i.key !== ticketKey);
 	const hasIssues = work.length > 0;
 	const jira = config?.jira_project
 		? jiraSearchUrl(
@@ -899,11 +927,25 @@ function TicketsCard({
 				{hasIssues ? (
 					<IssuesTable issues={work} />
 				) : error ? (
-					error.message
+					<LoadError
+						variant="xs"
+						title="Could not load tickets"
+						onRetry={onRetry}
+					>
+						The fixVersion issues for this release are unavailable right now.
+					</LoadError>
 				) : !issues ? (
-					<Spinner size="md" />
+					<Spinner size="md" aria-label="Loading tickets" />
 				) : config?.jira_enabled === false ? (
-					"Jira sync off."
+					<EmptyState
+						variant="xs"
+						headingLevel="h4"
+						titleText="Jira sync is off"
+					>
+						<EmptyStateBody>
+							No tickets are stored for this version.
+						</EmptyStateBody>
+					</EmptyState>
 				) : (
 					<EmptyState
 						variant="xs"
@@ -916,9 +958,12 @@ function TicketsCard({
 	);
 }
 
+const ticketLimit = 20;
+
 function IssuesTable({ issues }: { issues: JiraIssue[] }) {
 	// Type, the second column, is the only sortable one.
 	const [direction, setDirection] = useState<"asc" | "desc">();
+	const [showAll, setShowAll] = useState(false);
 
 	const sortedIssues = useMemo(() => {
 		if (!direction) return issues;
@@ -928,39 +973,57 @@ function IssuesTable({ issues }: { issues: JiraIssue[] }) {
 		});
 	}, [issues, direction]);
 
+	const shown = showAll ? sortedIssues : sortedIssues.slice(0, ticketLimit);
+
 	return (
-		<Table variant="compact" style={{ tableLayout: "auto" }}>
-			<Thead>
-				<Tr>
-					<Th style={{ whiteSpace: "nowrap" }}>Key</Th>
-					<Th
-						sort={{
-							sortBy: { index: direction && 1, direction },
-							onSort: (_event, _index, d) => setDirection(d),
-							columnIndex: 1,
-						}}
-						modifier="fitContent"
-					>
-						Type
-					</Th>
-					<Th>Summary</Th>
-				</Tr>
-			</Thead>
-			<Tbody>
-				{sortedIssues.map((issue) => (
-					<Tr key={issue.key}>
-						<Td style={{ whiteSpace: "nowrap" }}>
-							<a href={issue.link} {...external}>
-								{issue.key}
-							</a>
-						</Td>
-						<Td style={{ whiteSpace: "nowrap" }}>{issue.issue_type}</Td>
-						<Td style={{ whiteSpace: "normal", wordBreak: "break-word" }}>
-							{issue.summary}
-						</Td>
+		<>
+			<Table
+				aria-label="Tickets"
+				variant="compact"
+				style={{ tableLayout: "auto" }}
+			>
+				<Thead>
+					<Tr>
+						<Th style={{ whiteSpace: "nowrap" }}>Key</Th>
+						<Th
+							sort={{
+								sortBy: { index: direction && 1, direction },
+								onSort: (_event, _index, d) => setDirection(d),
+								columnIndex: 1,
+							}}
+							modifier="fitContent"
+						>
+							Type
+						</Th>
+						<Th>Summary</Th>
 					</Tr>
-				))}
-			</Tbody>
-		</Table>
+				</Thead>
+				<Tbody>
+					{shown.map((issue) => (
+						<Tr key={issue.key}>
+							<Td dataLabel="Key" style={{ whiteSpace: "nowrap" }}>
+								<a href={issue.link} {...external}>
+									{issue.key}
+								</a>
+							</Td>
+							<Td dataLabel="Type" style={{ whiteSpace: "nowrap" }}>
+								{issue.issue_type}
+							</Td>
+							<Td
+								dataLabel="Summary"
+								style={{ whiteSpace: "normal", wordBreak: "break-word" }}
+							>
+								{issue.summary}
+							</Td>
+						</Tr>
+					))}
+				</Tbody>
+			</Table>
+			{issues.length > ticketLimit && (
+				<Button variant="link" onClick={() => setShowAll(!showAll)}>
+					{showAll ? "Show fewer" : `Show all ${issues.length} tickets`}
+				</Button>
+			)}
+		</>
 	);
 }

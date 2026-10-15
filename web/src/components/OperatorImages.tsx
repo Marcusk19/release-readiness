@@ -5,6 +5,7 @@ import {
 	Flex,
 	Gallery,
 	Label,
+	Title,
 } from "@patternfly/react-core";
 import type { ReactNode } from "react";
 import type {
@@ -12,6 +13,8 @@ import type {
 	OperatorImage,
 	ReleaseCandidate,
 } from "../api/types";
+import { SHOW_CVES } from "../utils/features";
+import { commitUrl } from "../utils/links";
 import {
 	bundleBuilt,
 	candidateOperators,
@@ -53,7 +56,7 @@ export function Flags({ flags }: { flags: Flag[] }) {
 		<Label
 			key={f.text}
 			isCompact
-			color={f.color}
+			status={f.status}
 			render={
 				f.href
 					? ({ className, content, componentRef }) => (
@@ -118,20 +121,27 @@ export function OperatorImages({
 	/** The version's X.Y.Z. */
 	version: string;
 }) {
+	const operators = candidateOperators(d);
+	if (operators.length === 0) return null;
 	return (
-		<Gallery
-			hasGutter
-			minWidths={{ default: "100%", lg: "24rem" }}
-			style={{ marginBottom: "1rem" }}
-		>
-			{candidateOperators(d).map((o) => (
-				<OperatorPanel key={o.operator} o={o} version={version} />
-			))}
-		</Gallery>
+		<>
+			<Title headingLevel="h2" size="lg" style={{ marginBottom: "0.5rem" }}>
+				Images in the candidate's bundles
+			</Title>
+			<Gallery
+				hasGutter
+				minWidths={{ default: "100%", lg: "24rem" }}
+				style={{ marginBottom: "1rem" }}
+			>
+				{operators.map((o) => (
+					<OperatorPanel key={o.operator} o={o} version={version} />
+				))}
+			</Gallery>
+		</>
 	);
 }
 
-const icons = ["failed", "warning", "running", "done"] as const;
+const icons = ["failed", "warning", undefined, "done"] as const;
 
 const divider = "1px solid var(--pf-t--global--border--color--default)";
 
@@ -145,7 +155,7 @@ function OperatorPanel({ o, version }: { o: OperatorFBC; version: string }) {
 		.filter((r) => r.image.nvr || r.issues.length > 0)
 		.sort((a, b) => worst(a) - worst(b));
 	const others = images.filter((r) => !art.includes(r));
-	const problems = art.filter((r) => worst(r) < 2).length;
+	const problems = art.filter((r) => worst(r) < 2);
 	const ri = o.fbc_ri_stage.release;
 	return (
 		<Card isCompact>
@@ -155,9 +165,14 @@ function OperatorPanel({ o, version }: { o: OperatorFBC; version: string }) {
 					alignItems={{ default: "alignItemsCenter" }}
 				>
 					<span>{o.operator}</span>
-					{problems > 0 && (
-						<Label isCompact color="red">
-							{problems} to check
+					{problems.length > 0 && (
+						<Label
+							isCompact
+							status={
+								problems.some((r) => worst(r) === 0) ? "danger" : "warning"
+							}
+						>
+							{problems.length} to check
 						</Label>
 					)}
 				</Flex>
@@ -174,29 +189,34 @@ function OperatorPanel({ o, version }: { o: OperatorFBC; version: string }) {
 				)}
 			</CardTitle>
 			<CardBody>
-				{art.map((r) => (
-					<div
-						key={r.image.digest}
-						style={{ padding: "0.375rem 0", borderTop: divider }}
-					>
-						<Status status={icons[worst(r)]}>
-							<strong>{r.label}</strong>
-						</Status>
-						<Flex
-							gap={{ default: "gapSm" }}
-							alignItems={{ default: "alignItemsCenter" }}
-							style={{ fontSize: "0.85rem", marginTop: "0.125rem" }}
+				{art.map((r) => {
+					const icon = icons[worst(r)];
+					const label = <strong>{r.label}</strong>;
+					const href = commitUrl(r.label, r.image.commit);
+					return (
+						<div
+							key={r.image.digest}
+							style={{ padding: "0.375rem 0", borderTop: divider }}
 						>
-							<BuiltCell image={r.image} />
-							<code style={muted} title={r.image.commit}>
-								{r.image.commit.slice(0, 7)}
-							</code>
-							{/* CVE column hidden until pulls to the scan results exist; re-enable then. */}
-							{/* <CveCell image={r.image} /> */}
-							<Flags flags={r.issues} />
-						</Flex>
-					</div>
-				))}
+							{icon ? <Status status={icon}>{label}</Status> : label}
+							<Flex
+								gap={{ default: "gapSm" }}
+								alignItems={{ default: "alignItemsCenter" }}
+								style={{ fontSize: "0.85rem", marginTop: "0.125rem" }}
+							>
+								<BuiltCell image={r.image} />
+								<ExtLink href={href} title={r.image.commit}>
+									{/* muted only when unlinked, so a link takes the link colour */}
+									<code style={href ? undefined : muted}>
+										{r.image.commit.slice(0, 7)}
+									</code>
+								</ExtLink>
+								{SHOW_CVES && <CveCell image={r.image} />}
+								<Flags flags={r.issues} />
+							</Flex>
+						</div>
+					);
+				})}
 				{others.length > 0 && (
 					<div
 						style={{
