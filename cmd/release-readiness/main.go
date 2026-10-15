@@ -25,6 +25,7 @@ import (
 	"github.com/quay/release-readiness/internal/jira"
 	"github.com/quay/release-readiness/internal/kube"
 	"github.com/quay/release-readiness/internal/prow"
+	"github.com/quay/release-readiness/internal/reconcile"
 	"github.com/quay/release-readiness/internal/scan"
 	"github.com/quay/release-readiness/internal/server"
 	"github.com/quay/release-readiness/internal/shipment"
@@ -74,6 +75,14 @@ func main() {
 
 	// Retention flags
 	retention := flag.Duration("retention", 720*time.Hour, "age past which data no release needs is pruned daily and not ingested (0 disables)")
+
+	// GitHub flags
+	githubToken := flag.String("github-token", os.Getenv("GITHUB_TOKEN"), "read-only GitHub token for commit range lookups")
+
+	// Jira writer flags
+	jiraWrite := flag.Bool("jira-write", os.Getenv("JIRA_WRITE") == "true", "write the reconciler's proposed actions to JIRA (needs -jira-write-email and -jira-write-token)")
+	jiraWriteEmail := flag.String("jira-write-email", os.Getenv("JIRA_WRITE_EMAIL"), "JIRA Cloud account email of the write credential")
+	jiraWriteToken := flag.String("jira-write-token", os.Getenv("JIRA_WRITE_TOKEN"), "JIRA Cloud API token of the write credential, never the -jira-token one")
 
 	flag.Parse()
 
@@ -168,6 +177,30 @@ func main() {
 		render := fbc.NewSync(fbc.NewRegistry(&http.Client{Timeout: 5 * time.Minute}), database, history, logger.With("component", "fbc-render"))
 		render.Status = status.Track("fbc-render", 10*time.Minute)
 		wg.Go(func() { render.Run(ctx, 10*time.Minute) })
+
+		if *githubToken == "" {
+			logger.Warn("no -github-token, reconcile reads GitHub unauthenticated")
+		}
+		commits := reconcile.NewGitHubFetcher(&http.Client{Timeout: time.Minute}, *githubToken)
+		reconciler := reconcile.NewSync(database, commits, logger.With("component", "reconcile"))
+		reconciler.Tx = func(ctx context.Context, fn func(reconcile.Store) error) error {
+			return database.InTx(ctx, func(txDB *db.DB) error {
+				return fn(txDB)
+			})
+		}
+		reconciler.Status = status.Track("reconcile", 10*time.Minute)
+		switch {
+		case !*jiraWrite:
+			logger.Info("jira writer off; proposed actions are logged only")
+		case *jiraWriteEmail == "" || *jiraWriteToken == "":
+			logger.Error("-jira-write without -jira-write-email and -jira-write-token, jira writer disabled")
+		default:
+			apiURL := cmp.Or(*jiraAPIURL, *jiraURL)
+			logger.Info("jira writer enabled", "api_url", apiURL)
+			writeClient := jira.New(jira.Config{BaseURL: apiURL, Email: *jiraWriteEmail, Token: *jiraWriteToken, Project: *jiraProject})
+			reconciler.Writer = reconcile.NewWriter(writeClient, database, *jiraProject, logger.With("component", "jira-writer"))
+		}
+		wg.Go(func() { reconciler.Run(ctx, 10*time.Minute) })
 	}
 
 	var shipped *catalog.Shipped

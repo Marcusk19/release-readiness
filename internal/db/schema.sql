@@ -111,6 +111,15 @@ CREATE TABLE IF NOT EXISTS art_history_records (
 CREATE INDEX IF NOT EXISTS idx_art_history_records_nvr ON art_history_records(group_name, build_type, nvr);
 CREATE INDEX IF NOT EXISTS idx_art_history_records_digest ON art_history_records(digest);
 
+-- Name and public source repository of an ART history record, as its full
+-- /build record gives them. source_repo '' marks a record checked that names
+-- none, so it is not fetched again.
+CREATE TABLE IF NOT EXISTS art_source_repos (
+    record_id    TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    source_repo  TEXT NOT NULL
+);
+
 -- Days of ART build history whose successful builds are all stored. A day
 -- whose listing was capped or failed is not.
 CREATE TABLE IF NOT EXISTS art_history_record_days (
@@ -215,4 +224,46 @@ CREATE TABLE IF NOT EXISTS image_scans (
 CREATE TABLE IF NOT EXISTS sync_status (
     source       TEXT PRIMARY KEY,
     last_success TIMESTAMP NOT NULL
+);
+
+-- The first FBC each stream/operator/OCP slot was reconciled from. A row is
+-- never overwritten.
+CREATE TABLE IF NOT EXISTS reconcile_baselines (
+    stream      TEXT NOT NULL,
+    operator    TEXT NOT NULL,
+    ocp         TEXT NOT NULL,
+    fbc_digest  TEXT NOT NULL,
+    PRIMARY KEY (stream, operator, ocp)
+);
+
+-- What the reconciler decided for each issue an FBC's STAGE Release fixes,
+-- with its commit evidence. The reconciler never replaces a proposed row;
+-- the JIRA writer moves it to applied, error or skipped, storing each step's
+-- result so a retry redoes only the steps not done.
+CREATE TABLE IF NOT EXISTS reconcile_actions (
+    fbc_digest              TEXT NOT NULL,
+    issue_key               TEXT NOT NULL,
+    release_name            TEXT NOT NULL,
+    assembly                TEXT NOT NULL,
+    fbc_nvr                 TEXT NOT NULL DEFAULT '',
+    evidence_json           TEXT NOT NULL DEFAULT '',
+    desired_target_version  TEXT NOT NULL DEFAULT '',
+    status                  TEXT NOT NULL,
+    skip_reason             TEXT NOT NULL DEFAULT '',
+    error                   TEXT NOT NULL DEFAULT '',
+    version_step            TEXT NOT NULL DEFAULT '',
+    transition_step         TEXT NOT NULL DEFAULT '',
+    comment_step            TEXT NOT NULL DEFAULT '',
+    attempts                INTEGER NOT NULL DEFAULT 0,
+    updated_at              TEXT NOT NULL,
+    PRIMARY KEY (fbc_digest, issue_key, release_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reconcile_actions_issue ON reconcile_actions(issue_key);
+
+-- Each STAGE FBC the reconciler is done with.
+CREATE TABLE IF NOT EXISTS reconcile_runs (
+    release_name TEXT NOT NULL,
+    fbc_digest  TEXT NOT NULL,
+    PRIMARY KEY (release_name, fbc_digest)
 );
