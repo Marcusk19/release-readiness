@@ -13,14 +13,13 @@ import {
 	DescriptionListDescription,
 	DescriptionListGroup,
 	DescriptionListTerm,
-	Dropdown,
-	DropdownItem,
-	DropdownList,
+	Drawer,
+	DrawerContent,
+	DrawerContentBody,
 	EmptyState,
 	EmptyStateBody,
 	ExpandableSection,
 	Flex,
-	FlexItem,
 	Form,
 	FormGroup,
 	FormHelperText,
@@ -32,7 +31,6 @@ import {
 	Label,
 	List,
 	ListItem,
-	MenuToggle,
 	Modal,
 	ModalBody,
 	ModalHeader,
@@ -47,8 +45,8 @@ import {
 import {
 	CheckCircleIcon,
 	CopyIcon,
+	CubesIcon,
 	ExclamationTriangleIcon,
-	ExternalLinkAltIcon,
 	InfoCircleIcon,
 	TimesCircleIcon,
 } from "@patternfly/react-icons";
@@ -56,41 +54,46 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import {
 	type CSSProperties,
 	type ReactNode,
-	useEffect,
-	useMemo,
 	useRef,
 	useState,
+	useSyncExternalStore,
 } from "react";
-import { Link, type To, useParams, useSearchParams } from "react-router-dom";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import {
 	getCandidate,
 	getFBCTags,
 	getRelease,
+	getReleaseCI,
 	listReleaseIssues,
 } from "../api/client";
 import type {
 	DashboardConfig,
+	FBCBuild,
 	FBCCandidate,
 	FBCMember,
 	JiraIssue,
+	KonfluxRelease,
 	ReleaseCandidate,
 	ReleaseVersion,
 	ShipmentMR,
 } from "../api/types";
 import LoadError, { Loading, ReleaseNotFound } from "../components/LoadError";
+import OpenIn from "../components/OpenIn";
 import {
+	BundleImages,
 	ExtLink,
 	external,
 	type Issue,
 	IssueNotes,
 	LEVELS,
 	muted,
-	OperatorImages,
 	ORDER,
+	StageFacts,
+	useNarrow,
 } from "../components/OperatorImages";
 import { ShipmentLabels } from "../components/ShipmentLabels";
 import { Status } from "../components/Status";
-import { SyncProblems, useSyncStatus } from "../components/SyncStatusWarning";
+import { useSyncStatus } from "../components/SyncStatusWarning";
 import { useCachedFetch } from "../hooks/useCachedFetch";
 import { useConfig } from "../hooks/useConfig";
 import { type Blocker, blockers } from "../utils/blockers";
@@ -102,6 +105,7 @@ import {
 } from "../utils/fbcMatrix";
 import { days, due, relative } from "../utils/format";
 import {
+	ART_PIPELINES_HEALTH_URL,
 	artPipelineUrl,
 	formatReleaseName,
 	jiraIssueUrl,
@@ -124,7 +128,6 @@ import {
 	fbcTagsLead,
 	fbcTagsNote,
 	fbcUnstagedTitle,
-	freshnessLine,
 	issueLists,
 	type LeftOut,
 	noFbcText,
@@ -133,16 +136,19 @@ import {
 	readingLine,
 	releaseLine,
 	runResult,
+	sharedStage,
+	ticketsByStatus,
 	tknCommand,
 	verdictLine,
 } from "../utils/releaseDetail";
+import CIDrawer from "./ReleaseCI";
 
-/** A verdict item where it applies: a matrix cell, an operator's card, or neither. */
+/** A verdict item where it applies: a matrix cell, an operator's images, or neither. */
 type Placed = Issue & { cell?: string; card?: string };
 
 /**
  * Each verdict item at its source: the matrix cells of the OCP versions it
- * names, else its operator's image card, else the whole candidate.
+ * names, else its operator's images, else the whole candidate.
  */
 function placeIssues(d: ReleaseCandidate, bs: Blocker[]): Placed[] {
 	const cells = new Set(fbcGroups(d).flatMap((g) => g.rows.map(cellKey)));
@@ -157,6 +163,15 @@ function placeIssues(d: ReleaseCandidate, bs: Blocker[]): Placed[] {
 		return [{ item, b }];
 	});
 }
+
+/** Below PatternFly's lg breakpoint the CI drawer is the page's full width. */
+const fullWidthQuery = "(max-width: 991px)";
+const fullWidthDrawer = () => matchMedia(fullWidthQuery).matches;
+const onFullWidthDrawer = (on: () => void) => {
+	const m = matchMedia(fullWidthQuery);
+	m.addEventListener("change", on);
+	return () => m.removeEventListener("change", on);
+};
 
 export default function ReleaseDetail() {
 	const { version } = useParams<{ version: string }>();
@@ -175,6 +190,10 @@ export default function ReleaseDetail() {
 	const candidate = useCachedFetch(`candidate:${version}`, () =>
 		getCandidate(version!),
 	);
+	const ci = useCachedFetch(`ci:${version}`, () => getReleaseCI(version!));
+	const [params, setParams] = useSearchParams();
+	const ciCell = params.get("ci");
+	const covered = useSyncExternalStore(onFullWidthDrawer, fullWidthDrawer);
 
 	if (!release && !releaseError) {
 		return (
@@ -225,70 +244,99 @@ export default function ReleaseDetail() {
 
 	return (
 		<PageSection>
-			<DetailBreadcrumb name={release.name} />
+			<Drawer isExpanded={!!ciCell} isInline position="end">
+				<DrawerContent
+					panelContent={
+						<CIDrawer
+							cell={ciCell}
+							builds={ci.data}
+							error={ci.error}
+							onRetry={ci.refetch}
+							onClose={() =>
+								setParams(
+									(prev) => {
+										const next = new URLSearchParams(prev);
+										next.delete("ci");
+										return next;
+									},
+									{ replace: true },
+								)
+							}
+						/>
+					}
+				>
+					{/* The open drawer covers the page below lg; hidden, it is out of the tab order too. */}
+					<DrawerContentBody
+						style={covered && ciCell ? { display: "none" } : undefined}
+					>
+						<DetailBreadcrumb name={release.name} />
 
-			<div style={{ marginBottom: "1rem" }}>
-				<Title headingLevel="h1" size="2xl">
-					{formatReleaseName(release.name)}
-				</Title>
-				<Freshness data={candidate.data} />
-			</div>
+						<div style={{ marginBottom: "1rem" }}>
+							<Title headingLevel="h1" size="2xl">
+								{formatReleaseName(release.name)}
+							</Title>
+							<Freshness data={candidate.data} />
+						</div>
 
-			<ReleaseFacts
-				release={release}
-				shipped={candidate.data?.shipped ?? release.released}
-				shipmentMR={release.shipment_mr}
-				jiraBaseUrl={config?.jira_base_url}
-			/>
+						<ReleaseFacts
+							release={release}
+							shipped={candidate.data?.shipped ?? release.released}
+							shipmentMR={release.shipment_mr}
+							jiraBaseUrl={config?.jira_base_url}
+							stage={candidate.data && sharedStage(candidate.data)}
+						/>
 
-			<BuildsCard
-				data={candidate.data}
-				error={candidate.error}
-				onRetry={candidate.refetch}
-				version={xyz}
-				issues={issues ?? []}
-				konflux={konfluxUrl(
-					config?.konflux_ui_url ?? "",
-					config?.konflux_namespace ?? "",
-					app,
-				)}
-				inputs={
-					pullspecs &&
-					!candidate.data?.shipped && (
-						<ReleaseInputsButton>
-							<ReleaseInputs
-								app={app}
-								release={release.name}
-								version={xyz}
-								issues={tickets}
-								issuesError={ticketsError}
-								onRetry={refetchTickets}
-								jiraEnabled={config?.jira_enabled !== false}
-								ticketKey={release.release_ticket_key}
-								namespace={config?.konflux_namespace || "art-quay-tenant"}
-								dueDate={release.due_date}
-							/>
-						</ReleaseInputsButton>
-					)
-				}
-			/>
+						<BuildsCard
+							data={candidate.data}
+							error={candidate.error}
+							onRetry={candidate.refetch}
+							version={xyz}
+							issues={issues ?? []}
+							ci={ci.data}
+							konflux={konfluxUrl(
+								config?.konflux_ui_url ?? "",
+								config?.konflux_namespace ?? "",
+								app,
+							)}
+							jira={
+								config?.jira_project
+									? jiraSearchUrl(
+											ticketsJql(config.jira_project, release.name),
+											config.jira_base_url,
+										)
+									: null
+							}
+							inputs={
+								pullspecs &&
+								!candidate.data?.shipped && (
+									<ReleaseInputsButton>
+										<ReleaseInputs
+											app={app}
+											release={release.name}
+											version={xyz}
+											issues={tickets}
+											issuesError={ticketsError}
+											onRetry={refetchTickets}
+											jiraEnabled={config?.jira_enabled !== false}
+											ticketKey={release.release_ticket_key}
+											namespace={config?.konflux_namespace || "art-quay-tenant"}
+											dueDate={release.due_date}
+										/>
+									</ReleaseInputsButton>
+								)
+							}
+						/>
 
-			{candidate.data?.fbc_candidate && (
-				<OperatorImages
-					d={candidate.data}
-					version={xyz}
-					issues={(op) => (issues ?? []).filter((i) => i.card === op)}
-				/>
-			)}
-
-			<TicketsCard
-				issues={tickets}
-				error={ticketsError}
-				onRetry={refetchTickets}
-				version={version!}
-				config={config}
-				ticketKey={release.release_ticket_key}
-			/>
+						<TicketsCard
+							issues={tickets}
+							error={ticketsError}
+							onRetry={refetchTickets}
+							config={config}
+							ticketKey={release.release_ticket_key}
+						/>
+					</DrawerContentBody>
+				</DrawerContent>
+			</Drawer>
 		</PageSection>
 	);
 }
@@ -305,13 +353,10 @@ function DetailBreadcrumb({ name }: { name: string }) {
 }
 
 /**
- * How current the page's data is: when its sources last synced, the stale
- * ones (a popover with their problems), FBC reads and a prod Release still
- * in flight.
+ * The release's own status under its title: FBC reads and a prod Release
+ * still in flight. Sync state is the masthead's.
  */
 function Freshness({ data }: { data?: ReleaseCandidate }) {
-	const status = useSyncStatus();
-	const line = status && freshnessLine(status);
 	const read = data && readingLine(data.reading);
 	const prod = data?.candidate?.prod;
 	const prodLine = prod && releaseLine(prod);
@@ -325,27 +370,6 @@ function Freshness({ data }: { data?: ReleaseCandidate }) {
 				marginTop: "0.25rem",
 			}}
 		>
-			{line?.updated && <span>{line.updated}</span>}
-			{line?.stale && (
-				<Popover
-					headerContent="Sync problems"
-					bodyContent={<SyncProblems problems={line.problems} />}
-				>
-					<Button
-						variant="link"
-						isInline
-						size="sm"
-						icon={
-							<Icon status="warning" isInline>
-								<ExclamationTriangleIcon />
-							</Icon>
-						}
-						style={{ fontSize: "inherit" }}
-					>
-						{line.stale}
-					</Button>
-				</Popover>
-			)}
 			{read && <Status status={read.status}>{read.text}</Status>}
 			{prodLine && prodLine.status !== "done" && (
 				<span title={prod.name}>
@@ -358,19 +382,21 @@ function Freshness({ data }: { data?: ReleaseCandidate }) {
 
 /**
  * The target date, flagged while unshipped once past or within 3 days, the
- * ticket, its assignee and the shipment MR: the release's facts in the page
- * header.
+ * ticket, its assignee, the shipment MR, and the stage Release every operator
+ * shares: the release's facts in the page header.
  */
 function ReleaseFacts({
 	release,
 	shipped,
 	shipmentMR: mr,
 	jiraBaseUrl,
+	stage,
 }: {
 	release: ReleaseVersion;
 	shipped: boolean;
 	shipmentMR: ShipmentMR | null;
 	jiraBaseUrl?: string;
+	stage?: KonfluxRelease | null;
 }) {
 	const ticket = release.release_ticket_key;
 	const target = release.due_date ?? release.release_date;
@@ -379,7 +405,7 @@ function ReleaseFacts({
 		<DescriptionList
 			isCompact
 			isAutoFit
-			autoFitMinModifier={{ default: "8rem", lg: "12rem" }}
+			autoFitMinModifier={{ default: "8rem", lg: "9rem" }}
 			style={{ marginBottom: "1.5rem" }}
 		>
 			<DescriptionListGroup>
@@ -430,54 +456,17 @@ function ReleaseFacts({
 					</DescriptionListDescription>
 				</DescriptionListGroup>
 			)}
+			{stage && <StageFacts ri={stage} />}
 		</DescriptionList>
 	);
 }
 
-/** A card title with a link out on the right, hidden without an href. */
-function LinkedCardTitle({
-	href,
-	link,
-	children,
-}: {
-	href?: string | null;
-	link?: string;
-	children: ReactNode;
-}) {
-	return (
-		<CardTitle>
-			<Flex
-				justifyContent={{ default: "justifyContentSpaceBetween" }}
-				alignItems={{ default: "alignItemsCenter" }}
-			>
-				<FlexItem>{children}</FlexItem>
-				<Flex spaceItems={{ default: "spaceItemsSm" }}>
-					{href && (
-						<FlexItem>
-							<Button
-								component="a"
-								variant="secondary"
-								size="sm"
-								href={href}
-								{...external}
-								icon={<ExternalLinkAltIcon />}
-								iconPosition="end"
-							>
-								{link}
-							</Button>
-						</FlexItem>
-					)}
-				</Flex>
-			</Flex>
-		</CardTitle>
-	);
-}
-
 /**
- * The version's release candidate as its FBC matrix, or why it has none; a
- * shipped version's is labeled, with nothing to release. Its blockers are
- * shown where they apply (whole-candidate ones above the matrix, the rest at
- * their cells and image cards) and announced to screen readers.
+ * The version's release candidate as its FBC matrix and bundle images, or why
+ * it has none; a shipped version's is labeled, with nothing to release. Its
+ * blockers are shown where they apply (whole-candidate ones above the matrix,
+ * the rest at their cells and operators' images) and announced to screen
+ * readers.
  */
 function BuildsCard({
 	data,
@@ -485,7 +474,9 @@ function BuildsCard({
 	onRetry,
 	version,
 	issues,
+	ci,
 	konflux,
+	jira,
 	inputs,
 }: {
 	data?: ReleaseCandidate;
@@ -494,12 +485,15 @@ function BuildsCard({
 	/** The version's X.Y.Z. */
 	version: string;
 	issues: Placed[];
+	/** The version's FBC builds and their CI runs. */
+	ci?: FBCBuild[];
 	/** The version's application in the Konflux UI. */
 	konflux: string | null;
+	/** The version's tickets in Jira. */
+	jira: string | null;
 	/** The release command button. */
 	inputs?: ReactNode;
 }) {
-	const [params] = useSearchParams();
 	const fbc = data?.fbc_candidate;
 	return (
 		<Card style={{ marginBottom: "1.5rem" }}>
@@ -510,15 +504,14 @@ function BuildsCard({
 							{inputs}
 							<OpenIn
 								items={[
-									{
-										text: "CI history",
-										to: { pathname: "ci", search: params.toString() },
-									},
+									{ text: "CI history", to: { search: "ci=all" } },
 									{
 										text: "Sippy",
 										href: fbc ? sippyRunsUrl(version, fbcsBuilt(fbc)) : null,
 									},
 									{ text: "Konflux", href: konflux },
+									{ text: "Jira", href: jira },
+									{ text: "ART pipelines", href: ART_PIPELINES_HEALTH_URL },
 								]}
 							/>
 						</Flex>
@@ -548,86 +541,45 @@ function BuildsCard({
 						Its builds, CI, and release status are unavailable right now.
 					</LoadError>
 				) : fbc ? (
-					<FbcMatrix data={data} fbc={fbc} issues={issues} />
+					<>
+						<FbcMatrix data={data} fbc={fbc} issues={issues} ci={ci} />
+						<BundleImages
+							d={data}
+							version={version}
+							issues={(op) => issues.filter((i) => i.card === op)}
+						/>
+					</>
 				) : data.shipped ? (
-					`v${version} has shipped. No FBC build data is recorded for it.`
+					<EmptyState variant="xs" headingLevel="h3" titleText="No FBC data">
+						<EmptyStateBody>
+							v{version} has shipped. No FBC build data is recorded for it.
+						</EmptyStateBody>
+					</EmptyState>
+				) : data.reason === "not a concrete quay-vX.Y.Z version" ? (
+					<EmptyState
+						variant="xs"
+						headingLevel="h3"
+						titleText="No FBCs expected"
+					>
+						<EmptyStateBody>Only Quay versions have FBC builds.</EmptyStateBody>
+					</EmptyState>
 				) : (
-					noFbcText(version, data.reason)
+					<EmptyState
+						variant="xs"
+						headingLevel="h3"
+						icon={CubesIcon}
+						titleText="No FBCs yet"
+					>
+						<EmptyStateBody>
+							{data.reason && data.reason !== "no release candidate yet"
+								? noFbcText(version, data.reason)
+								: `The matrix fills in once ART builds an FBC for v${version}.`}
+						</EmptyStateBody>
+					</EmptyState>
 				)}
 			</CardBody>
 		</Card>
 	);
-}
-
-/**
- * The places to open the candidate in, behind one toggle. An item with an
- * href opens it in a new tab, one with a to is a router link, and one with
- * neither is left out.
- */
-function OpenIn({
-	items,
-}: {
-	items: { text: string; href?: string | null; to?: To }[];
-}) {
-	const [open, setOpen] = useState(false);
-	return (
-		<Dropdown
-			isOpen={open}
-			onSelect={() => setOpen(false)}
-			onOpenChange={setOpen}
-			popperProps={{ position: "right" }}
-			toggle={(ref) => (
-				<MenuToggle
-					ref={ref}
-					variant="secondary"
-					size="sm"
-					isExpanded={open}
-					onClick={() => setOpen(!open)}
-				>
-					Open in
-				</MenuToggle>
-			)}
-		>
-			<DropdownList>
-				{items
-					.filter((i) => i.href || i.to)
-					.map(({ text, href, to }) =>
-						href ? (
-							<DropdownItem key={text} to={href} {...external}>
-								{text} {/* PF's own external icon shows only on hover. */}
-								<ExternalLinkAltIcon
-									style={{
-										marginInlineStart: "0.25rem",
-										color: "var(--pf-t--global--icon--color--subtle)",
-									}}
-								/>
-							</DropdownItem>
-						) : (
-							<DropdownItem
-								key={text}
-								component={(p) => <Link {...p} to={to ?? ""} />}
-							>
-								{text}
-							</DropdownItem>
-						),
-					)}
-			</DropdownList>
-		</Dropdown>
-	);
-}
-
-// Phone width, where the matrix turns on its side.
-const narrowQuery = "(max-width: 768px)";
-
-function useNarrow() {
-	const [narrow, setNarrow] = useState(() => matchMedia(narrowQuery).matches);
-	useEffect(() => {
-		const m = matchMedia(narrowQuery);
-		const on = () => setNarrow(m.matches);
-		m.addEventListener("change", on);
-		return () => m.removeEventListener("change", on);
-	}, []);
-	return narrow;
 }
 
 /** Operators as a phone-width column header names them. */
@@ -648,10 +600,12 @@ function FbcMatrix({
 	data,
 	fbc,
 	issues,
+	ci,
 }: {
 	data: ReleaseCandidate;
 	fbc: FBCCandidate;
 	issues: Placed[];
+	ci?: FBCBuild[];
 }) {
 	const narrow = useNarrow();
 	const [params, setParams] = useSearchParams();
@@ -676,6 +630,16 @@ function FbcMatrix({
 	const at = (d: string, a: string) =>
 		cells.get(narrow ? `${a}@${d}` : `${d}@${a}`);
 	const picked = params.get("cell");
+	// CI runs on a cell's builds other than its FBC, for its detail's link.
+	const others = (r: FbcRow) =>
+		(ci ?? [])
+			.filter(
+				(b) =>
+					b.operator === r.operator &&
+					b.ocp === r.ocp &&
+					b.digest !== r.fbc?.digest,
+			)
+			.reduce((n, b) => n + b.runs.length, 0);
 	const select = (key: string | null) =>
 		setParams(
 			(prev) => {
@@ -739,6 +703,7 @@ function FbcMatrix({
 											<MatrixCell
 												cell={c}
 												issues={issues.filter((x) => x.cell === key)}
+												others={others(c.row)}
 												green={staged ? "built and staged" : "built"}
 												open={picked === key}
 												position={
@@ -817,6 +782,7 @@ const cellIcons = {
 function MatrixCell({
 	cell: { row, stream, problem },
 	issues,
+	others,
 	green,
 	open,
 	position,
@@ -825,6 +791,7 @@ function MatrixCell({
 }: {
 	cell: Cell;
 	issues: Issue[];
+	others: number;
 	green: string;
 	open: boolean;
 	position: PopoverProps["position"];
@@ -866,7 +833,7 @@ function MatrixCell({
 				bodyContent={
 					<div style={{ display: "grid", gap: "0.75rem" }}>
 						{issues.length > 0 && <IssueNotes issues={issues} />}
-						<FbcDetail row={row} stream={stream} />
+						<FbcDetail row={row} stream={stream} others={others} />
 					</div>
 				}
 			>
@@ -901,7 +868,15 @@ function Failed({ children }: { children: ReactNode }) {
  * One FBC, check by check; each row says what is absent when it is. Without
  * one, only the check it fails: Built, or Staged under the stream's build.
  */
-function FbcDetail({ row, stream }: { row: FbcRow; stream: FBCMember | null }) {
+function FbcDetail({
+	row,
+	stream,
+	others,
+}: {
+	row: FbcRow;
+	stream: FBCMember | null;
+	others: number;
+}) {
 	const f = row.fbc;
 	const built = f ?? stream;
 	return (
@@ -936,14 +911,25 @@ function FbcDetail({ row, stream }: { row: FbcRow; stream: FBCMember | null }) {
 					</DetailLine>
 				)
 			) : (
-				<FbcChecks row={row} f={f} />
+				<FbcChecks row={row} f={f} others={others} />
 			)}
 		</dl>
 	);
 }
 
-/** A built FBC's checks after Built. */
-function FbcChecks({ row, f }: { row: FbcRow; f: FBCMember }) {
+/**
+ * A built FBC's checks after Built; with CI runs on the cell's other builds,
+ * a link opening them in the CI drawer.
+ */
+function FbcChecks({
+	row,
+	f,
+	others,
+}: {
+	row: FbcRow;
+	f: FBCMember;
+	others: number;
+}) {
 	const unread = row.flags.find((x) => x.text === "can't read");
 	const older = row.flags.find((x) => x.text.startsWith("holds an older"));
 	const bundle = row.images.find((i) => i.nvr === f.head_bundle_nvr);
@@ -999,7 +985,7 @@ function FbcChecks({ row, f }: { row: FbcRow; f: FBCMember }) {
 			</DetailLine>
 			<DetailLine label="CI">
 				{row.runs.length === 0
-					? none("No runs")
+					? none(others > 0 ? "No runs on this build" : "No runs")
 					: row.runs.map((p) => {
 							const r = runResult(p.state);
 							const link = (
@@ -1022,6 +1008,16 @@ function FbcChecks({ row, f }: { row: FbcRow; f: FBCMember }) {
 								</div>
 							);
 						})}
+				{others > 0 && (
+					<div>
+						<Link
+							to={`?ci=${row.operator}@${row.ocp}`}
+							style={{ display: "inline-block", padding: "4px 0" }}
+						>
+							{others} run{others === 1 ? "" : "s"} on other builds
+						</Link>
+					</div>
+				)}
 			</DetailLine>
 		</>
 	);
@@ -1386,32 +1382,24 @@ function TicketsCard({
 	issues,
 	error,
 	onRetry,
-	version,
 	config,
 	ticketKey,
 }: {
 	issues?: JiraIssue[];
 	error?: Error;
 	onRetry: () => void;
-	version: string;
 	config?: DashboardConfig;
 	ticketKey?: string;
 }) {
 	const work = (issues ?? []).filter((i) => i.key !== ticketKey);
 	const hasIssues = work.length > 0;
-	const jira = config?.jira_project
-		? jiraSearchUrl(
-				ticketsJql(config.jira_project, version),
-				config.jira_base_url,
-			)
-		: null;
 
 	return (
 		<Card isCompact style={{ marginBottom: "1rem" }}>
-			<LinkedCardTitle href={jira} link="Jira">
+			<CardTitle>
 				Tickets
 				{hasIssues && ` (${work.length})`}
-			</LinkedCardTitle>
+			</CardTitle>
 			<CardBody>
 				{hasIssues ? (
 					<IssuesTable issues={work} />
@@ -1447,70 +1435,89 @@ function TicketsCard({
 	);
 }
 
-const ticketLimit = 20;
+function TicketStatus({ status }: { status: string }) {
+	return status === "Closed" ? (
+		<span style={muted}>Closed</span>
+	) : (
+		<Label isCompact>{status || "No status"}</Label>
+	);
+}
 
 function IssuesTable({ issues }: { issues: JiraIssue[] }) {
-	// Type, the second column, is the only sortable one.
-	const [direction, setDirection] = useState<"asc" | "desc">();
-	const [showAll, setShowAll] = useState(false);
-
-	const sortedIssues = useMemo(() => {
-		if (!direction) return issues;
-		return [...issues].sort((a, b) => {
-			const cmp = a.issue_type.localeCompare(b.issue_type);
-			return direction === "asc" ? cmp : -cmp;
-		});
-	}, [issues, direction]);
-
-	const shown = showAll ? sortedIssues : sortedIssues.slice(0, ticketLimit);
+	const narrow = useNarrow();
+	const [showClosed, setShowClosed] = useState(false);
+	const { open, closed } = ticketsByStatus(issues);
+	const shown = showClosed ? open.concat(closed) : open;
 
 	return (
 		<>
 			<Table
 				aria-label="Tickets"
 				variant="compact"
+				gridBreakPoint=""
 				style={{ tableLayout: "auto" }}
 			>
 				<Thead>
 					<Tr>
-						<Th style={{ whiteSpace: "nowrap" }}>Key</Th>
-						<Th
-							sort={{
-								sortBy: { index: direction && 1, direction },
-								onSort: (_event, _index, d) => setDirection(d),
-								columnIndex: 1,
-							}}
-							modifier="fitContent"
-						>
-							Type
-						</Th>
-						<Th>Summary</Th>
+						<Th modifier="nowrap">{narrow ? "Ticket" : "Key"}</Th>
+						{!narrow && <Th modifier="nowrap">Status</Th>}
+						{!narrow && <Th modifier="nowrap">Type</Th>}
+						{!narrow && <Th>Summary</Th>}
 					</Tr>
 				</Thead>
 				<Tbody>
-					{shown.map((issue) => (
-						<Tr key={issue.key}>
-							<Td dataLabel="Key" style={{ whiteSpace: "nowrap" }}>
-								<a href={issue.link} {...external}>
-									{issue.key}
-								</a>
-							</Td>
-							<Td dataLabel="Type" style={{ whiteSpace: "nowrap" }}>
-								{issue.issue_type}
-							</Td>
-							<Td
-								dataLabel="Summary"
-								style={{ whiteSpace: "normal", wordBreak: "break-word" }}
-							>
-								{issue.summary}
-							</Td>
-						</Tr>
-					))}
+					{shown.map((issue) =>
+						narrow ? (
+							<Tr key={issue.key}>
+								<Td dataLabel="Ticket">
+									<Flex
+										gap={{ default: "gapSm" }}
+										alignItems={{ default: "alignItemsCenter" }}
+									>
+										<a href={issue.link} {...external}>
+											{issue.key}
+										</a>
+										<TicketStatus status={issue.status} />
+										<span style={muted}>{issue.issue_type}</span>
+									</Flex>
+									<div
+										style={{ marginTop: "0.125rem", overflowWrap: "anywhere" }}
+									>
+										{issue.summary}
+									</div>
+								</Td>
+							</Tr>
+						) : (
+							<Tr key={issue.key}>
+								<Td dataLabel="Key" modifier="nowrap">
+									<a href={issue.link} {...external}>
+										{issue.key}
+									</a>
+								</Td>
+								<Td dataLabel="Status" modifier="nowrap">
+									<TicketStatus status={issue.status} />
+								</Td>
+								<Td dataLabel="Type" modifier="nowrap" style={muted}>
+									{issue.issue_type}
+								</Td>
+								<Td dataLabel="Summary" style={{ overflowWrap: "anywhere" }}>
+									{issue.summary}
+								</Td>
+							</Tr>
+						),
+					)}
 				</Tbody>
 			</Table>
-			{issues.length > ticketLimit && (
-				<Button variant="link" onClick={() => setShowAll(!showAll)}>
-					{showAll ? "Show fewer" : `Show all ${issues.length} tickets`}
+			{closed.length > 0 && (
+				<Button
+					variant="link"
+					isInline
+					style={{ marginTop: "0.75rem" }}
+					onClick={() => setShowClosed(!showClosed)}
+				>
+					{showClosed
+						? "Hide closed tickets"
+						: `Show ${closed.length} closed ticket${closed.length === 1 ? "" : "s"}`}
 				</Button>
 			)}
 		</>

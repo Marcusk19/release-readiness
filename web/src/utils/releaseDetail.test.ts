@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type {
 	CIJob,
+	FBCBuild,
 	FBCCandidate,
 	FBCMember,
 	FBCTag,
@@ -17,6 +18,7 @@ import type {
 import {
 	artGroup,
 	bundleBuilt,
+	ciBuilds,
 	compareVersions,
 	fbcGroups,
 	fbcNewerTitle,
@@ -43,9 +45,12 @@ import {
 	rowChips,
 	runResult,
 	scanCell,
+	sharedStage,
 	shownOperators,
 	slotItem,
 	slotRows,
+	stamp,
+	ticketsByStatus,
 	tknCommand,
 	verdictEntries,
 	verdictLine,
@@ -264,6 +269,26 @@ test("issueLists: left-out issues by status, the largest group first", () => {
 test("issueLists: undefined while the issues load, empty lists with none", () => {
 	assert.equal(issueLists(undefined, "PROJQUAY-2"), undefined);
 	assert.deepEqual(issueLists([]), { keys: [], leftOut: [] });
+});
+
+test("ticketsByStatus: open nearest to shipping first, Closed apart, by key number", () => {
+	const { open, closed } = ticketsByStatus([
+		issue("PROJQUAY-10", "Closed"),
+		issue("PROJQUAY-3", "MODIFIED"),
+		issue("PROJQUAY-20", "Release Pending"),
+		issue("PROJQUAY-4", "Closed"),
+		issue("PROJQUAY-7", "Triage"),
+		issue("PROJQUAY-9", "Release Pending"),
+		issue("PROJQUAY-5", "ON_QA"),
+	]);
+	assert.deepEqual(
+		open.map((i) => i.key),
+		["PROJQUAY-9", "PROJQUAY-20", "PROJQUAY-5", "PROJQUAY-3", "PROJQUAY-7"],
+	);
+	assert.deepEqual(
+		closed.map((i) => i.key),
+		["PROJQUAY-4", "PROJQUAY-10"],
+	);
 });
 
 test("tknCommand: carries the Release Pending issues only", () => {
@@ -983,7 +1008,7 @@ test("freshnessLine", () => {
 	// A source on its first pass has no age yet.
 	assert.deepEqual(freshnessLine({ problems: [], sources }), {
 		updated: "Updated 7 minutes ago",
-		stale: null,
+		oldest: sources[1].last_success,
 		problems: [],
 	});
 
@@ -1006,7 +1031,7 @@ test("freshnessLine", () => {
 		freshnessLine({ problems: [failing, stale, scans], sources }),
 		{
 			updated: "Updated 2 minutes ago",
-			stale: "Stale: ART build history, Shipment MRs",
+			oldest: sources[0].last_success,
 			problems: [failing, stale],
 		},
 	);
@@ -1021,12 +1046,16 @@ test("freshnessLine", () => {
 				{ source: "reconcile", last_success: ago(30) },
 			],
 		}),
-		{ updated: "Updated 7 minutes ago", stale: null, problems: [] },
+		{
+			updated: "Updated 7 minutes ago",
+			oldest: sources[1].last_success,
+			problems: [],
+		},
 	);
 
 	assert.deepEqual(freshnessLine({ problems: [], sources: [] }), {
 		updated: null,
-		stale: null,
+		oldest: null,
 		problems: [],
 	});
 });
@@ -1193,4 +1222,73 @@ test("fbcUnstagedTitle and fbcNewerTitle count and agree in number", () => {
 		fbcNewerTitle(2),
 		"ART has newer builds than the staged FBCs: the list keeps the staged tags",
 	);
+});
+
+test("sharedStage: the one stage Release every operator holds, else null", () => {
+	const staged = (r1: KonfluxRelease | null, r2: KonfluxRelease | null) => {
+		const op = (operator: string, r: KonfluxRelease | null) =>
+			operatorFBC(operator, "", [], {
+				fbc_ri_stage: { state: r ? "in" : "none", release: r },
+			});
+		return {
+			shipped: false,
+			candidate: null,
+			reason: "",
+			fbc_candidate: fbcCandidate({
+				operators: [
+					op("quay-operator", r1),
+					op("container-security-operator", r2),
+				],
+			}),
+			fbc_stream: null,
+			verdict: { state: "ready", items: [] },
+			reading: { read: 0, failed: 0, pending: 0, history_days: 0 },
+		} satisfies ReleaseCandidate;
+	};
+	const a = release({ name: "quay-3-18-fbc-stage-20261007200215" });
+	assert.equal(sharedStage(staged(a, release({ name: a.name }))), a);
+	assert.equal(sharedStage(staged(a, release({ name: "other" }))), null);
+	assert.equal(sharedStage(staged(a, null)), null);
+	assert.equal(sharedStage(staged(null, a)), null);
+});
+
+test("stamp: a stage Release's name by its timestamp, else the name", () => {
+	assert.equal(stamp("quay-3-18-fbc-stage-20261007200215"), "Oct 7 20:02 UTC");
+	assert.equal(stamp("quay-3-18-fbc-stage"), "quay-3-18-fbc-stage");
+});
+
+test("ciBuilds: a cell's builds with runs and its candidate, the candidate first; all, every build with a run", () => {
+	const build = (
+		nvr: string,
+		ocp: string,
+		state: FBCBuild["state"],
+		runs: number,
+	): FBCBuild => ({
+		operator: "quay-operator",
+		ocp,
+		nvr,
+		digest: "",
+		built_at: null,
+		state,
+		runs: Array.from({ length: runs }, () => ({
+			job: "j",
+			state: "success",
+			started_at: "",
+			prow_url: "",
+		})),
+	});
+	// Newest first, as the API lists them.
+	const builds = [
+		build("newer", "4.22", "", 1),
+		build("bare", "4.22", "", 0),
+		build("candidate", "4.22", "candidate", 0),
+		build("older", "4.22", "staged", 2),
+		build("other", "4.21", "", 1),
+		build("shipped", "4.21", "shipped", 0),
+	];
+	const nvrs = (cell: string) => ciBuilds(builds, cell).map((b) => b.nvr);
+	assert.deepEqual(nvrs("quay-operator@4.22"), ["candidate", "newer", "older"]);
+	assert.deepEqual(nvrs("all"), ["newer", "older", "other"]);
+	assert.deepEqual(nvrs("quay-operator@4.21"), ["shipped", "other"]);
+	assert.deepEqual(nvrs("container-security-operator@4.22"), []);
 });

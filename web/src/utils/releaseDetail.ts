@@ -1,5 +1,6 @@
 import type {
 	CIRun,
+	FBCBuild,
 	FBCCandidate,
 	FBCMember,
 	FBCTags,
@@ -17,6 +18,29 @@ import type {
 } from "../api/types";
 import { SHOW_CVES } from "./features.ts";
 import { relative } from "./format.ts";
+
+/** The candidate's build; a shipped version's candidate is labeled shipped. */
+const isCandidate = (b: FBCBuild) =>
+	b.state === "candidate" || b.state === "shipped";
+
+/**
+ * The CI drawer's builds: cell "<operator>@<ocp>"'s with a run, and its
+ * candidate's without one, the candidate's first; for "all", every build with
+ * a run.
+ */
+export function ciBuilds(builds: FBCBuild[], cell: string): FBCBuild[] {
+	const [operator, ocp] = cell.split("@");
+	// The API lists builds newest first; the sort is stable.
+	return builds
+		.filter((b) =>
+			cell === "all"
+				? b.runs.length > 0
+				: b.operator === operator &&
+					b.ocp === ocp &&
+					(b.runs.length > 0 || isCandidate(b)),
+		)
+		.sort((a, b) => Number(isCandidate(b)) - Number(isCandidate(a)));
+}
 
 // A "-nightly" segment, at the end or before a suffix like "-fips".
 const NIGHTLY = /-nightly(?=-|$)/;
@@ -656,6 +680,39 @@ export function issueLists(
 	};
 }
 
+// Open Jira statuses, nearest to shipping first; any other open status after.
+const openOrder = [
+	RELEASE_PENDING,
+	"Verified",
+	"ON_QA",
+	"MODIFIED",
+	"POST",
+	"ASSIGNED",
+	"New",
+];
+const openRank = (status: string) => {
+	const i = openOrder.indexOf(status);
+	return i < 0 ? openOrder.length : i;
+};
+
+/**
+ * Splits tickets into open ones, nearest to shipping first, and Closed ones,
+ * each by key number. Release Pending is open: the FBC writer moves staged
+ * issues there before they ship.
+ */
+export function ticketsByStatus<T extends { key: string; status: string }>(
+	issues: T[],
+): { open: T[]; closed: T[] } {
+	const sorted = [...issues].sort(
+		(a, b) =>
+			openRank(a.status) - openRank(b.status) || byKeyNumber(a.key, b.key),
+	);
+	return {
+		open: sorted.filter((i) => i.status !== "Closed"),
+		closed: sorted.filter((i) => i.status === "Closed"),
+	};
+}
+
 /** The tkn command that starts release-from-fbc with params. */
 export const tknCommand = (params: Record<string, string>) =>
 	[
@@ -729,6 +786,24 @@ export const candidateOperators = (d: ReleaseCandidate): OperatorFBC[] =>
 				(s) => s.operator,
 			)
 		: [];
+
+/** The stage Release every operator shares, else null. */
+export function sharedStage(d: ReleaseCandidate): KonfluxRelease | null {
+	const rs = candidateOperators(d).map((o) => o.fbc_ri_stage.release);
+	const first = rs[0];
+	return first && rs.every((r) => r?.name === first.name) ? first : null;
+}
+
+/** A stage Release's name by its timestamp, "Oct 7 20:02 UTC". */
+export function stamp(name: string) {
+	const t = name.match(/(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)\d\d$/);
+	if (!t) return name;
+	const month = new Date(Date.UTC(+t[1], +t[2] - 1)).toLocaleString("en-US", {
+		month: "short",
+		timeZone: "UTC",
+	});
+	return `${month} ${+t[3]} ${t[4]}:${t[5]} UTC`;
+}
 
 const repo = (image: string) => image.split("@")[0];
 
@@ -821,12 +896,12 @@ const NON_DATA = new Set(["retention", "reconcile"]);
 
 /**
  * How current the page's data is: when the least recent data source not
- * stale last succeeded, and the stale ones by name. CVE scans count only
- * while shown.
+ * stale last succeeded, that time, and the stale sources. CVE scans count
+ * only while shown.
  */
 export function freshnessLine(s: SyncStatus): {
 	updated: string | null;
-	stale: string | null;
+	oldest: string | null;
 	problems: SyncProblem[];
 } {
 	const shown = (x: { source: string }) =>
@@ -836,15 +911,11 @@ export function freshnessLine(s: SyncStatus): {
 	const last = s.sources
 		.filter((f) => shown(f) && !bad.has(f.source) && !NON_DATA.has(f.source))
 		.flatMap((f) => (f.last_success ? [Date.parse(f.last_success)] : []));
+	const oldest =
+		last.length > 0 ? new Date(Math.min(...last)).toISOString() : null;
 	return {
-		updated:
-			last.length > 0
-				? `Updated ${relative(new Date(Math.min(...last)).toISOString())}`
-				: null,
-		stale:
-			problems.length > 0
-				? `Stale: ${problems.map((p) => SOURCE_NAMES[p.source] ?? p.source).join(", ")}`
-				: null,
+		updated: oldest && `Updated ${relative(oldest)}`,
+		oldest,
 		problems,
 	};
 }
