@@ -27,6 +27,7 @@ import (
 	"github.com/quay/release-readiness/internal/kube"
 	"github.com/quay/release-readiness/internal/prow"
 	"github.com/quay/release-readiness/internal/reconcile"
+	"github.com/quay/release-readiness/internal/release"
 	"github.com/quay/release-readiness/internal/scan"
 	"github.com/quay/release-readiness/internal/server"
 	"github.com/quay/release-readiness/internal/shipment"
@@ -255,8 +256,10 @@ func main() {
 		})
 	}
 
-	srv := server.New(database, *addr, *jiraURL, *jiraProject, *artURL, shipped, status, logger)
-	srv.StageReleasePlanPattern = stagePlans
+	selector := release.NewSelector(database, shipped)
+	selector.ArtBaseURL = *artURL
+	selector.StageReleasePlanPattern = stagePlans
+	srv := server.New(database, *addr, *jiraURL, *jiraProject, selector, status, logger)
 	srv.KonfluxUIURL = *konfluxUIURL
 	srv.KonfluxNamespace = *namespace
 
@@ -268,7 +271,7 @@ func main() {
 	if *gitlabURL != "" {
 		logger.Info("shipment MR sync enabled", "url", *gitlabURL, "project", *shipmentProject, "token", *gitlabToken != "", "interval", *gitlabPollInterval)
 		client := shipment.NewClient(*gitlabURL, *buildDataURL, *shipmentProject, *gitlabToken, &http.Client{Timeout: time.Minute})
-		syncer := shipment.NewSyncer(client, database, srv.ShipmentVersions, logger.With("component", "shipment-mrs"))
+		syncer := shipment.NewSyncer(client, database, selector.ShipmentVersions, logger.With("component", "shipment-mrs"))
 		syncer.Status = status.Track("shipment-mrs", *gitlabPollInterval)
 		wg.Go(func() { syncer.Run(ctx, *gitlabPollInterval) })
 	}
@@ -291,7 +294,7 @@ func main() {
 		} else {
 			logger.Info("image scan sync enabled", "url", *resultsURL)
 			results := scan.NewClient(*resultsURL, &http.Client{Timeout: time.Minute, Transport: rt})
-			syncer := scan.NewSyncer(results, art, database, srv.CandidateDigests, logger.With("component", "image-scans"))
+			syncer := scan.NewSyncer(results, art, database, selector.CandidateDigests, logger.With("component", "image-scans"))
 			syncer.Status = status.Track("image-scans", 5*time.Minute)
 			wg.Go(func() {
 				// Until the catalog is read, the versions it shipped look

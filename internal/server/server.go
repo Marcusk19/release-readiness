@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"regexp"
 	"time"
 
 	"github.com/quay/release-readiness/internal/artfbc"
-	"github.com/quay/release-readiness/internal/catalog"
 	"github.com/quay/release-readiness/internal/db"
+	"github.com/quay/release-readiness/internal/release"
 	"github.com/quay/release-readiness/internal/syncstatus"
 )
 
@@ -20,12 +19,8 @@ type Server struct {
 	logger      *slog.Logger
 	jiraBaseURL string
 	jiraProject string
-	artBaseURL  string
-	shipped     *catalog.Shipped
+	selector    *release.Selector
 	syncStatus  *syncstatus.Registry
-	// StageReleasePlanPattern matches the ReleasePlan names whose Releases
-	// are image STAGE; nil selects no staged build.
-	StageReleasePlanPattern *regexp.Regexp
 	// KonfluxUIURL and KonfluxNamespace locate the Konflux UI pages the web
 	// links to; an empty URL links none.
 	KonfluxUIURL, KonfluxNamespace string
@@ -34,10 +29,9 @@ type Server struct {
 	ArtFBC *artfbc.Client
 }
 
-// New builds the server. A nil shipped leaves JIRA's released flag as the only
-// shipped signal.
-func New(database *db.DB, addr, jiraBaseURL, jiraProject, artBaseURL string, shipped *catalog.Shipped, syncStatus *syncstatus.Registry, logger *slog.Logger) *Server {
-	s := &Server{db: database, logger: logger, jiraBaseURL: jiraBaseURL, jiraProject: jiraProject, artBaseURL: artBaseURL, shipped: shipped, syncStatus: syncStatus}
+// New builds the server.
+func New(database *db.DB, addr, jiraBaseURL, jiraProject string, selector *release.Selector, syncStatus *syncstatus.Registry, logger *slog.Logger) *Server {
+	s := &Server{db: database, logger: logger, jiraBaseURL: jiraBaseURL, jiraProject: jiraProject, selector: selector, syncStatus: syncStatus}
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 
@@ -57,14 +51,18 @@ func New(database *db.DB, addr, jiraBaseURL, jiraProject, artBaseURL string, shi
 }
 
 func (s *Server) Run(ctx context.Context) error {
+	// Buffered so the goroutine never blocks once Run has stopped receiving.
+	errc := make(chan error, 1)
 	go func() {
 		s.logger.Info("listening", "addr", s.http.Addr)
-		if err := s.http.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			s.logger.Error("server error", "error", err)
-		}
+		errc <- s.http.ListenAndServe()
 	}()
 
-	<-ctx.Done()
+	select {
+	case err := <-errc:
+		return fmt.Errorf("listen: %w", err)
+	case <-ctx.Done():
+	}
 	s.logger.Info("shutting down")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

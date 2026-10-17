@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/quay/release-readiness/internal/model"
+	"github.com/quay/release-readiness/internal/release"
 	"github.com/quay/release-readiness/internal/syncstatus"
 )
 
@@ -82,9 +83,9 @@ type streamBuilds struct {
 // latestBuild returns when the version's newest build was created: the newer
 // of its newest build and its selected STAGE build, or nil when it has
 // neither. streams keeps each application's stream builds once read.
-func (s *Server) latestBuild(ctx context.Context, release *model.ReleaseVersion, streams map[string]streamBuilds) (*time.Time, error) {
-	app := release.KonfluxApplication
-	m := quayVersion.FindStringSubmatch(release.Name)
+func (s *Server) latestBuild(ctx context.Context, rel *model.ReleaseVersion, streams map[string]streamBuilds) (*time.Time, error) {
+	app := rel.KonfluxApplication
+	m := quayVersion.FindStringSubmatch(rel.Name)
 	if app == "" || m == nil {
 		return nil, nil
 	}
@@ -98,10 +99,10 @@ func (s *Server) latestBuild(ctx context.Context, release *model.ReleaseVersion,
 		streams[app] = st
 	}
 	var latest *time.Time
-	if builds := versionBuilds(app, st.builds, st.nvrs, m[1]); len(builds) > 0 {
+	if builds := release.VersionBuilds(app, st.builds, st.nvrs, m[1]); len(builds) > 0 {
 		latest = &builds[0].CreatedAt
 	}
-	staged, err := s.db.SelectedStageBuild(ctx, release, s.StageReleasePlanPattern)
+	staged, err := s.db.SelectedStageBuild(ctx, rel, s.selector.StageReleasePlanPattern)
 	if err != nil || staged == nil {
 		return latest, err
 	}
@@ -115,11 +116,8 @@ func (s *Server) latestBuild(ctx context.Context, release *model.ReleaseVersion,
 	return latest, nil
 }
 
-// catalogShipped reports whether the catalog publishes the fixVersion, e.g.
-// quay-v3.17.5 as quay 3.17.5.
 func (s *Server) catalogShipped(name string) bool {
-	product, version, _ := strings.Cut(name, "-v")
-	return s.shipped.Has(product, version)
+	return s.selector.CatalogShipped(name)
 }
 
 func (s *Server) handleReleasesOverview(w http.ResponseWriter, r *http.Request) {
@@ -168,28 +166,6 @@ func (s *Server) handleReleasesOverview(w http.ResponseWriter, r *http.Request) 
 	markNextInStream(overviews)
 
 	writeJSON(w, http.StatusOK, overviews)
-}
-
-// ShipmentVersions returns the quay-vX.Y.Z versions whose shipment MRs are
-// polled: those the overview shows as not shipped, and those whose stored MR
-// is still open, since a version can ship before ART merges its MR.
-func (s *Server) ShipmentVersions(ctx context.Context) ([]string, error) {
-	releases, err := s.db.ListAllReleaseVersions(ctx)
-	if err != nil {
-		return nil, err
-	}
-	mrs, err := s.db.ShipmentMRs(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var versions []string
-	for _, rel := range releases {
-		open := mrs[rel.Name] != nil && mrs[rel.Name].State == "opened"
-		if (open || (!rel.Released && !s.catalogShipped(rel.Name))) && quayVersion.MatchString(rel.Name) {
-			versions = append(versions, rel.Name)
-		}
-	}
-	return versions, nil
 }
 
 // markNextInStream flags the lowest unshipped z of each product and
