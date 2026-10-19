@@ -33,7 +33,11 @@ import {
 	ToolbarItem,
 	Tooltip,
 } from "@patternfly/react-core";
-import { CopyIcon, ExternalLinkAltIcon } from "@patternfly/react-icons";
+import {
+	CopyIcon,
+	ExternalLinkAltIcon,
+	MinusCircleIcon,
+} from "@patternfly/react-icons";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import { type ReactNode, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
@@ -626,7 +630,7 @@ function Candidate({
 								</Td>
 								<Td dataLabel="CI" modifier="nowrap">
 									{r.runs.length === 0 ? (
-										<span style={muted}>No runs</span>
+										<NoCIRun />
 									) : (
 										<RunSummary runs={r.runs} />
 									)}
@@ -684,6 +688,20 @@ const levelStatus: Record<VerdictItem["level"], LabelProps["status"]> = {
 	warning: "warning",
 	info: "info",
 };
+
+/** A neutral result when no periodic CI job has installed this FBC. */
+function NoCIRun() {
+	return (
+		<Flex gap={{ default: "gapSm" }} flexWrap={{ default: "nowrap" }}>
+			<FlexItem>
+				<MinusCircleIcon style={muted} />
+			</FlexItem>
+			<FlexItem>
+				<span style={muted}>No CI run</span>
+			</FlexItem>
+		</Flex>
+	);
+}
 
 /** A run result's place when counted, worst first. */
 const severity = (s?: StatusLine["status"]) =>
