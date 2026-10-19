@@ -48,6 +48,7 @@ import {
 	CubesIcon,
 	ExclamationTriangleIcon,
 	InfoCircleIcon,
+	MinusCircleIcon,
 	TimesCircleIcon,
 } from "@patternfly/react-icons";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
@@ -823,6 +824,13 @@ const cellIcons = {
 		</Icon>
 	),
 	running: <Icon size="xl" isInProgress />,
+	neutral: (
+		<Icon size="xl">
+			<span style={muted}>
+				<MinusCircleIcon />
+			</span>
+		</Icon>
+	),
 	success: (
 		<Icon status="success" size="xl">
 			<CheckCircleIcon />
@@ -831,10 +839,11 @@ const cellIcons = {
 };
 
 /**
- * One FBC as one icon: a check when green, a red X when it is missing or
- * fails or a blocker is about it, else its problem's or item's icon; the
- * words are in its tooltip and name. A click opens its detail, led by the
- * items about it. An edge column's detail opens inward to stay on screen.
+ * One FBC as one icon: a check when green, a neutral minus when it has no CI
+ * run, a red X when it is missing or fails or a blocker is about it, else its
+ * problem's or item's icon; the words are in its tooltip and name. A click
+ * opens its detail, led by the items about it. An edge column's detail opens
+ * inward to stay on screen.
  */
 function MatrixCell({
 	cell: { row, stream, problem },
@@ -861,6 +870,7 @@ function MatrixCell({
 	)[0];
 	const top = first?.item.level;
 	const status = problem && PROBLEMS[problem].status;
+	const noCIRun = row.runs.length === 0;
 	const tone: keyof typeof cellIcons =
 		!row.fbc || status === "failed" || top === "blocker"
 			? "danger"
@@ -870,12 +880,16 @@ function MatrixCell({
 					? "warning"
 					: top === "info"
 						? "info"
-						: "success";
+						: noCIRun
+							? "neutral"
+							: "success";
 	const said = problem
 		? problem[0].toUpperCase() + problem.slice(1)
 		: first
 			? `${LEVELS[first.item.level].word}: ${first.b.what}`
-			: green;
+			: noCIRun
+				? "No CI run"
+				: green;
 	return (
 		<>
 			{tone !== "success" && <Tooltip content={said} triggerRef={ref} />}
@@ -1042,7 +1056,7 @@ function FbcChecks({
 			</DetailLine>
 			<DetailLine label="CI">
 				{row.runs.length === 0
-					? none(others > 0 ? "No runs on this build" : "No runs")
+					? none(others > 0 ? "No CI run on this build" : "No CI run")
 					: row.runs.map((p) => {
 							const r = runResult(p.state);
 							const link = (
