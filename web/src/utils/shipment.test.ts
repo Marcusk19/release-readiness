@@ -35,9 +35,9 @@ test("shipmentChip stages", () => {
 		tooltip: "!948 · Stage released",
 	});
 	assert.deepEqual(shipmentChip(mr({ stage: "prod_released" })), {
-		text: "Prod released",
+		text: "Shipment MR open",
 		status: "info",
-		tooltip: "!948 · Prod released",
+		tooltip: "!948 · Shipment MR open",
 	});
 	assert.deepEqual(shipmentChip(mr({ stage: "shipped", state: "merged" })), {
 		text: "Shipment MR: shipped",
@@ -74,17 +74,19 @@ test("shipmentFlags", () => {
 	);
 });
 
-test("shipmentLabel of a shipped version reads Shipment MR: shipped", () => {
-	// ART can merge the MR after the release ships.
+test("shipmentLabel reports shipped only after the MR merges", () => {
 	assert.deepEqual(
-		shipmentLabel(mr({ stage: "prod_released", needs_approval: true }), true),
+		shipmentLabel(mr({ stage: "prod_released", needs_approval: true })),
 		{
-			text: "Shipment MR: shipped",
-			status: "success",
-			tooltip: "!948 · Prod released",
+			text: "Shipment MR open",
+			status: "info",
+			tooltip: "!948 · Shipment MR open",
 		},
 	);
-	assert.equal(shipmentLabel(mr(), false).text, "Shipment MR open");
+	assert.equal(
+		shipmentLabel(mr({ state: "merged", stage: "shipped" })).text,
+		"Shipment MR: shipped",
+	);
 });
 
 test("shipmentText names the stage and, before shipping, the flags", () => {
